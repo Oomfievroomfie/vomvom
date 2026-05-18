@@ -14,7 +14,8 @@ pub const SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MTIME_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct Session {
-    pub conn: Connection,
+    // None for demo/screenshot sessions that must not touch SQLite.
+    conn: Option<Connection>,
     pub buffers: Vec<Buffer>,
     pub active_idx: usize,
     last_sync: Instant,
@@ -58,11 +59,27 @@ impl Session {
         };
 
         Ok(Session {
-            conn,
+            conn: Some(conn),
             buffers,
             active_idx,
             last_sync: Instant::now(),
         })
+    }
+
+    /// Create a purely in-memory session with no SQLite connection.
+    /// Safe to use in screenshot/demo contexts where no persistence is wanted.
+    /// Access the underlying DB connection (None for demo sessions).
+    pub fn conn(&self) -> Option<&Connection> {
+        self.conn.as_ref()
+    }
+
+    pub fn new_demo() -> Self {
+        Session {
+            conn: None,
+            buffers: vec![Buffer::new(0, None, "")],
+            active_idx: 0,
+            last_sync: Instant::now(),
+        }
     }
 
     pub fn active(&self) -> &Buffer {
@@ -86,7 +103,11 @@ impl Session {
             return Ok(idx);
         }
         let content = std::fs::read_to_string(path).unwrap_or_default();
-        let id = insert_buffer(&self.conn, Some(path), &content)?;
+        let id = if let Some(conn) = &self.conn {
+            insert_buffer(conn, Some(path), &content)?
+        } else {
+            self.buffers.len() as i64
+        };
         let mut buf = Buffer::new(id, Some(path.to_string()), &content);
         buf.disk_mtime = Buffer::current_disk_mtime(path);
         buf.disk_status = DiskStatus::Ok;
@@ -97,7 +118,7 @@ impl Session {
     /// Call this on every frame/tick. Syncs dirty buffers if the interval has elapsed.
     /// Also sparsely refreshes disk status for the active buffer.
     pub fn tick(&mut self) -> rusqlite::Result<()> {
-        if self.last_sync.elapsed() >= SYNC_INTERVAL {
+        if self.conn.is_some() && self.last_sync.elapsed() >= SYNC_INTERVAL {
             self.sync_now()?;
         }
         let buf = &mut self.buffers[self.active_idx];
@@ -111,7 +132,11 @@ impl Session {
 
     /// Force an immediate sync of all dirty buffers.
     pub fn sync_now(&mut self) -> rusqlite::Result<()> {
-        let tx = self.conn.transaction()?;
+        let conn = match &mut self.conn {
+            Some(c) => c,
+            None => return Ok(()), // no-op for demo sessions
+        };
+        let tx = conn.transaction()?;
         let active_id = self.buffers.get(self.active_idx).map(|b| b.id);
 
         for buf in &mut self.buffers {
@@ -215,8 +240,8 @@ mod tests {
         {
             let mut session = Session::open(&path).unwrap();
             // Open a second buffer
-            let conn = db::open(&path).unwrap();
-            let id2 = db::insert_buffer(&conn, Some("/tmp/other.rs"), "x").unwrap();
+            let conn = session.conn().unwrap();
+            let id2 = db::insert_buffer(conn, Some("/tmp/other.rs"), "x").unwrap();
             let buf2 = Buffer::new(id2, Some("/tmp/other.rs".into()), "x");
             session.buffers.push(buf2);
             session.set_active(1);
@@ -259,7 +284,7 @@ mod tests {
         {
             let mut session = Session::open(&path).unwrap();
             session.active_mut().insert("buffer one");
-            let id2 = db::insert_buffer(&session.conn, Some("/b.rs"), "buffer two").unwrap();
+            let id2 = db::insert_buffer(session.conn().unwrap(), Some("/b.rs"), "buffer two").unwrap();
             session.buffers.push(Buffer::new(id2, Some("/b.rs".into()), "buffer two"));
             session.sync_now().unwrap();
         }

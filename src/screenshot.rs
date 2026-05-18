@@ -20,11 +20,8 @@ use winit::{
     dpi::PhysicalSize,
 };
 
-use crate::render::layout::{layout, finalize_positions, Constraints};
-use crate::render::paint::{PaintContext, paint_tree_root};
-use crate::render::tree::apply_styles;
 use crate::render::glyph_cache::GlyphCache;
-use crate::{build_demo_scene, update_scrollbar_styles, editor_content_height, SANS_BYTES, MONO_BYTES};
+use crate::{build_demo_scene, render_frame, SANS_BYTES};
 
 pub fn save_screenshot(path: &Path, width: u32, height: u32) {
     let event_loop = EventLoop::new().unwrap();
@@ -77,55 +74,39 @@ pub fn save_screenshot(path: &Path, width: u32, height: u32) {
     };
 
     let mut canvas = Canvas::new(renderer).expect("failed to create canvas");
-    canvas.set_size(width, height, 1.0);
 
-    let (mut scene, sheet, session) = build_demo_scene();
+    // Load fonts the same way the live app does.
+    let sans_id = canvas.add_font_mem(SANS_BYTES).expect("load sans");
+    let mono_id = canvas.add_font_mem(crate::MONO_BYTES).expect("load mono");
+    let femtovg_fonts = Some((sans_id, mono_id));
+
+    let (mut doc, sheet, session) = build_demo_scene();
     let font_size = 11.5_f32;
-    let editor_h = editor_content_height(height as f32);
 
-    canvas.clear_rect(0, 0, width, height, femtovg::Color::rgbf(0.15, 0.15, 0.18));
-
-    apply_styles(&mut scene, &sheet, &[], None);
-    update_scrollbar_styles(&mut scene, &session, editor_h, font_size);
-    let mut measurer = crate::render::femtovg_measurer::SwashMeasurer {
-        sans_data: SANS_BYTES,
-        mono_data: MONO_BYTES,
-    };
-    let mut lb = layout(&scene, Constraints::new(width as f32, height as f32), &mut measurer);
-    finalize_positions(&mut lb);
-
-    // Debug: print actual track/thumb layout boxes vs what update_scrollbar_styles assumed.
-    // Enable with VOMVOM_DEBUG_SCROLLBAR=1.
-    if std::env::var("VOMVOM_DEBUG_SCROLLBAR").is_ok() {
-        if let Some(editor_lb) = lb.children.get(2) {
-            if let Some(track_lb) = editor_lb.children.last() {
-                eprintln!("[screenshot debug] editor_h={editor_h:.1} track h={:.1} border_box=({:.1},{:.1},{:.1},{:.1})",
-                    track_lb.border_box.h,
-                    track_lb.border_box.x, track_lb.border_box.y,
-                    track_lb.border_box.w, track_lb.border_box.h);
-                if let Some(thumb_lb) = track_lb.children.first() {
-                    eprintln!("[screenshot debug] thumb border_box=({:.1},{:.1},{:.1},{:.1})",
-                        thumb_lb.border_box.x, thumb_lb.border_box.y,
-                        thumb_lb.border_box.w, thumb_lb.border_box.h);
-                }
-            }
-        }
-    }
+    // Highlight cache for the demo session (no SQLite involved).
+    let mut highlight_cache = std::collections::HashMap::new();
+    crate::rebuild_highlight_cache(&mut highlight_cache, &session);
 
     let mut glyph_cache = GlyphCache::new();
-    let mut ctx = PaintContext {
-        canvas: &mut canvas,
-        glyph_cache: &mut glyph_cache,
-        sans_data: SANS_BYTES,
-        mono_data: MONO_BYTES,
-        hint: true,
-        use_femtovg: false,
-        femtovg_fonts: None,
-    };
-    paint_tree_root(&mut ctx, &scene, &lb);
-    ctx.canvas.flush();
+    render_frame(
+        &mut canvas,
+        &mut glyph_cache,
+        &mut doc,
+        &session,
+        &highlight_cache,
+        &sheet,
+        font_size,
+        width as f32,
+        height as f32,
+        1.0,
+        femtovg_fonts,
+        true,
+        true, // use femtovg for screenshot
+    );
 
-    let img = ctx.canvas.screenshot().expect("screenshot failed");
+    canvas.flush();
+
+    let img = canvas.screenshot().expect("screenshot failed");
     let (w, h) = (img.width(), img.height());
     let pixels: Vec<u8> = img.pixels().flat_map(|p| [p.r, p.g, p.b, p.a]).collect();
     image::save_buffer(path, &pixels, w as u32, h as u32, image::ColorType::Rgba8)

@@ -446,27 +446,10 @@ impl ApplicationHandler for App {
                 let h = size.height as f32;
                 let scale = state.window.scale_factor() as f32;
 
-                // Sync doc from session before painting.
-                let editor_h = editor_content_height(h);
                 if state.highlight_dirty {
                     state.highlight_dirty = false;
                     rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
                 }
-                sync_doc_to_session(&mut state.doc, &state.session, &state.highlight_cache, visible_lines(editor_h, state.editor_font_size) + 1);
-
-                state.canvas.set_size(size.width, size.height, scale);
-                state.canvas.clear_rect(0, 0, size.width, size.height,
-                    femtovg::Color::rgbf(0.15, 0.15, 0.18));
-
-                apply_styles(&mut state.doc.root, &state.sheet, &[], None);
-                update_scrollbar_styles(&mut state.doc.root, &state.session, editor_h, state.editor_font_size);
-                let mut measurer = render::femtovg_measurer::SwashMeasurer {
-                    sans_data: SANS_BYTES,
-                    mono_data: MONO_BYTES,
-                };
-                let mut lb = layout(&state.doc.root, Constraints::new(w, h), &mut measurer);
-                finalize_positions(&mut lb);
-                state.last_layout = Some(lb.clone());
 
                 if state.femtovg_fonts.is_none() {
                     let sans_id = state.canvas.add_font_mem(SANS_BYTES).expect("load sans");
@@ -474,16 +457,20 @@ impl ApplicationHandler for App {
                     state.femtovg_fonts = Some((sans_id, mono_id));
                 }
 
-                let mut ctx = PaintContext {
-                    canvas: &mut state.canvas,
-                    glyph_cache: &mut state.glyph_cache,
-                    sans_data: SANS_BYTES,
-                    mono_data: MONO_BYTES,
-                    hint: state.hint,
-                    use_femtovg: state.use_femtovg,
-                    femtovg_fonts: state.femtovg_fonts,
-                };
-                paint_tree_root(&mut ctx, &state.doc.root, &lb);
+                let lb = render_frame(
+                    &mut state.canvas,
+                    &mut state.glyph_cache,
+                    &mut state.doc,
+                    &state.session,
+                    &state.highlight_cache,
+                    &state.sheet,
+                    state.editor_font_size,
+                    w, h, scale,
+                    state.femtovg_fonts,
+                    state.hint,
+                    state.use_femtovg,
+                );
+                state.last_layout = Some(lb.clone());
 
                 if state.debug_boxes {
                     render::paint::paint_debug_boxes(&mut state.canvas, &lb);
@@ -680,7 +667,7 @@ fn scroll_to_cursor(session: &mut Session, editor_h: f32, font_size: f32) {
 
 // --- Targeted document mutation functions ---
 
-fn rebuild_highlight_cache(cache: &mut std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>, session: &Session) {
+pub fn rebuild_highlight_cache(cache: &mut std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>, session: &Session) {
     let buf = session.active();
     let lang = highlight::lang_from_path(buf.path.as_deref());
     let lines: Vec<Vec<(String, &'static str)>> = (0..buf.line_count())
@@ -809,34 +796,79 @@ fn close_all_menus(doc: &mut Document) {
     doc.mark_dirty();
 }
 
-pub fn build_demo_scene() -> (Node, Stylesheet, Session) {
+/// Shared render logic used by both the live window loop and the screenshot path.
+/// Syncs the document from session state, runs layout, paints, and returns the layout tree.
+/// Does NOT flush/swap — callers do that.
+pub fn render_frame(
+    canvas: &mut Canvas<OpenGl>,
+    glyph_cache: &mut GlyphCache,
+    doc: &mut Document,
+    session: &Session,
+    highlight_cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>,
+    sheet: &Stylesheet,
+    font_size: f32,
+    w: f32,
+    h: f32,
+    scale: f32,
+    femtovg_fonts: Option<(FontId, FontId)>,
+    hint: bool,
+    use_femtovg: bool,
+) -> LayoutBox {
+    let editor_h = editor_content_height(h);
+    sync_doc_to_session(doc, session, highlight_cache, visible_lines(editor_h, font_size) + 1);
+
+    canvas.set_size(w as u32, h as u32, scale);
+    canvas.clear_rect(0, 0, w as u32, h as u32, femtovg::Color::rgbf(0.15, 0.15, 0.18));
+
+    apply_styles(&mut doc.root, sheet, &[], None);
+    update_scrollbar_styles(&mut doc.root, session, editor_h, font_size);
+
+    let mut measurer = render::femtovg_measurer::SwashMeasurer {
+        sans_data: SANS_BYTES,
+        mono_data: MONO_BYTES,
+    };
+    let mut lb = layout(&doc.root, Constraints::new(w, h), &mut measurer);
+    finalize_positions(&mut lb);
+
+    let mut ctx = PaintContext {
+        canvas,
+        glyph_cache,
+        sans_data: SANS_BYTES,
+        mono_data: MONO_BYTES,
+        hint,
+        use_femtovg,
+        femtovg_fonts,
+    };
+    paint_tree_root(&mut ctx, &doc.root, &lb);
+
+    lb
+}
+
+pub fn build_demo_scene() -> (Document, Stylesheet, Session) {
     use session::buffer::DiskStatus;
     let font_size = 11.5_f32;
     let sheet = build_stylesheet(font_size);
-    let mut session = Session::open(":memory:").expect("in-memory session");
+    // Demo session: no SQLite connection, purely in-memory buffers.
+    let mut session = Session::new_demo();
     session.active_mut().path = Some("demo.rs".into());
     session.active_mut().insert("// vomvom — custom rendering engine\n\nmod render;\n\nfn main() {\n    // build scene, run event loop\n    println!(\"hello world\");\n}");
     session.active_mut().disk_status = DiskStatus::Diverged;
 
-    // Extra tabs for visual testing.
-    let id2 = session::db::insert_buffer(&session.conn, Some("/tmp/modified.rs"), "hello").unwrap();
-    let mut buf2 = session::buffer::Buffer::new(id2, Some("/tmp/modified.rs".into()), "hello");
+    // Extra tabs for visual testing — push Buffer structs directly, no DB.
+    let mut buf2 = session::buffer::Buffer::new(1, Some("/tmp/modified.rs".into()), "hello");
     buf2.is_modified = true;
     session.buffers.push(buf2);
 
-    let id3 = session::db::insert_buffer(&session.conn, Some("/tmp/deleted.rs"), "").unwrap();
-    let mut buf3 = session::buffer::Buffer::new(id3, Some("/tmp/deleted.rs".into()), "");
+    let mut buf3 = session::buffer::Buffer::new(2, Some("/tmp/deleted.rs".into()), "");
     buf3.disk_status = DiskStatus::Deleted;
     session.buffers.push(buf3);
 
-    let id4 = session::db::insert_buffer(&session.conn, None, "").unwrap();
-    let buf4 = session::buffer::Buffer::new(id4, None, "");
-    session.buffers.push(buf4);
+    session.buffers.push(session::buffer::Buffer::new(3, None, ""));
 
     let mut cache = std::collections::HashMap::new();
     rebuild_highlight_cache(&mut cache, &session);
     let doc = Document::new(build_initial_document(&session, &cache));
-    (doc.root, sheet, session)
+    (doc, sheet, session)
 }
 
 fn main() {
