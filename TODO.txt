@@ -1,0 +1,8 @@
+Let's write a programming text editor!
+
+The two core philosophies:
+
+1) Complete, total, perfect hot exit implementation, including undo/redo history and unsaved buffers. The program can hard-crash or get nuked from orbit mid-operation and still end up with a coherent, recent load state. How? Dumping everything to an sqlite db as it runs. Every 5 minutes sync up the file contents and undo histories for anything that's changed since the last sync. And autoload it without asking the user on boot. Do it efficiently.
+
+2) Custom HTML/CSS-like rendering engine, but *not* actually HTML/CSS. It must have a cascade and selector system like CSS, and a vaguely HTML-like layout model. Write lots of static automatic performance tests.
+

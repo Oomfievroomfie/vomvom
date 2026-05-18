@@ -1,0 +1,18 @@
+[package]
+name = "vomvom"
+version = "0.1.0"
+edition = "2024"
+default-run = "vomvom"
+
+[dependencies]
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+winit = "0.30.13"
+femtovg = "0.9"
+glutin = "0.32"
+glutin-winit = "0.5"
+raw-window-handle = "0.6"
+image = { version = "0.25", default-features = false, features = ["png"] }
+swash = "0.2.7"
+imgref = "1.12.1"
+rgb = "0.8.53"
+zeno = "0.3.3"
