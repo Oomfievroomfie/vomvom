@@ -63,6 +63,8 @@ struct AppState {
     mouse_pos: (f32, f32),
     last_layout: Option<LayoutBox>,
     needs_redraw: bool,
+    redraw_in_flight: bool,
+    highlight_dirty: bool,
     ime_preedit: String,
     debug_boxes: bool,
     scrollbar_drag: bool,
@@ -163,6 +165,8 @@ impl ApplicationHandler for App {
             mouse_pos: (0.0, 0.0),
             last_layout: None,
             needs_redraw: true,
+            redraw_in_flight: false,
+            highlight_dirty: false,
             ime_preedit: String::new(),
             debug_boxes: false,
             scrollbar_drag: false,
@@ -193,14 +197,12 @@ impl ApplicationHandler for App {
                 match &key {
                     Key::Character(s) if ctrl && (s == "o" || s == "O") => {
                         open_file_dialog(&mut state.session);
-                        rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
-                        sync_doc_to_session(&mut state.doc, &state.session, &state.highlight_cache);
+                        state.highlight_dirty = true;
                         state.needs_redraw = true;
                         return;
                     }
                     Key::Character(s) if ctrl && (s == "s" || s == "S") => {
                         let _ = state.session.save_active();
-                        update_statusbar(&mut state.doc, &state.session);
                         state.needs_redraw = true;
                         return;
                     }
@@ -230,13 +232,13 @@ impl ApplicationHandler for App {
                         state.needs_redraw = true;
                         return;
                     }
-                    Key::Character(s) if ctrl && (s == "z" || s == "Z") => { buf.undo(); }
-                    Key::Character(s) if ctrl && (s == "y" || s == "Y") => { buf.redo(); }
-                    Key::Named(NamedKey::Backspace) => { buf.backspace(); }
-                    Key::Named(NamedKey::Delete) => { buf.delete_forward(); }
-                    Key::Named(NamedKey::Enter) => { buf.insert("\n"); }
-                    Key::Named(NamedKey::Space) => { buf.insert(" "); }
-                    Key::Named(NamedKey::Tab) => { buf.insert("    "); }
+                    Key::Character(s) if ctrl && (s == "z" || s == "Z") => { buf.undo(); state.highlight_dirty = true; }
+                    Key::Character(s) if ctrl && (s == "y" || s == "Y") => { buf.redo(); state.highlight_dirty = true; }
+                    Key::Named(NamedKey::Backspace) => { buf.backspace(); state.highlight_dirty = true; }
+                    Key::Named(NamedKey::Delete) => { buf.delete_forward(); state.highlight_dirty = true; }
+                    Key::Named(NamedKey::Enter) => { buf.insert("\n"); state.highlight_dirty = true; }
+                    Key::Named(NamedKey::Space) => { buf.insert(" "); state.highlight_dirty = true; }
+                    Key::Named(NamedKey::Tab) => { buf.insert("    "); state.highlight_dirty = true; }
                     Key::Named(NamedKey::ArrowLeft) => {
                         let pos = buf.cursor;
                         let (l, c) = if pos.col > 0 { (pos.line, pos.col - 1) } else if pos.line > 0 { (pos.line - 1, buf.line(pos.line - 1).chars().count()) } else { (0, 0) };
@@ -271,15 +273,12 @@ impl ApplicationHandler for App {
                         buf.move_cursor(line, len);
                         buf.break_undo_group();
                     }
-                    Key::Character(s) if !ctrl => { buf.insert(s); }
+                    Key::Character(s) if !ctrl => { buf.insert(s); state.highlight_dirty = true; }
                     _ => { dirty = false; }
                 }
                 if dirty {
                     let editor_h = editor_content_height(state.window.inner_size().height as f32);
                     scroll_to_cursor(&mut state.session, editor_h);
-                    rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
-                    update_editor(&mut state.doc, &state.session, &state.highlight_cache);
-                    update_statusbar(&mut state.doc, &state.session);
                     state.needs_redraw = true;
                 }
             }
@@ -296,8 +295,6 @@ impl ApplicationHandler for App {
                             let track_lb = track_lb.clone();
                             let scroll = scrollbar_y_to_scroll(&track_lb, &state.session, my, win_h);
                             state.session.active_mut().scroll_line = scroll;
-                            state.session.active_mut().dirty = true;
-                            update_editor(&mut state.doc, &state.session, &state.highlight_cache);
                             state.needs_redraw = true;
                         }
                     }
@@ -311,13 +308,11 @@ impl ApplicationHandler for App {
                 state.last_input = Some(Instant::now());
                 let (mx, my) = state.mouse_pos;
                 if let Some(ref lb) = state.last_layout.clone() {
-                    // Menu item click (dropdown open)?
                     if any_menu_open(&state.doc) {
                         if let Some(action) = hit_test_menu_item(&state.doc.root, lb, mx, my) {
                             close_all_menus(&mut state.doc);
                             execute_menu_action(&action, &mut state.session);
-                            rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
-                            sync_doc_to_session(&mut state.doc, &state.session, &state.highlight_cache);
+                            state.highlight_dirty = true;
                             state.needs_redraw = true;
                             return;
                         }
@@ -325,38 +320,30 @@ impl ApplicationHandler for App {
                         state.needs_redraw = true;
                         return;
                     }
-                    // Menu header click?
                     if let Some(menu_id) = hit_test_menu_header(&state.doc.root, lb, mx, my) {
                         open_menu(&mut state.doc, &menu_id);
                         state.needs_redraw = true;
                         return;
                     }
-                    // Tab click?
                     if let Some(idx) = hit_test_tab(&state.doc.root, lb, mx, my) {
                         state.session.set_active(idx);
-                        rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
-                        sync_doc_to_session(&mut state.doc, &state.session, &state.highlight_cache);
+                        state.highlight_dirty = true;
                         state.needs_redraw = true;
                         return;
                     }
-                    // Scrollbar track click — jump scroll position and start drag.
                     let win_h = state.window.inner_size().height as f32;
                     if let Some(track_lb) = scrollbar_track_lb(lb, mx, my) {
                         let track_lb = track_lb.clone();
                         let scroll = scrollbar_y_to_scroll(&track_lb, &state.session, my, win_h);
                         state.session.active_mut().scroll_line = scroll;
-                        state.session.active_mut().dirty = true;
                         state.scrollbar_drag = true;
-                        update_editor(&mut state.doc, &state.session, &state.highlight_cache);
                         state.needs_redraw = true;
-                    // Editor click — place cursor.
                     } else if let Some((line, col)) = hit_test_editor(lb, &state.session, mx, my, MONO_BYTES) {
                         let buf = state.session.active_mut();
                         buf.move_cursor(line, col);
                         buf.break_undo_group();
-                        scroll_to_cursor(&mut state.session, editor_content_height(win_h));
-                        update_editor(&mut state.doc, &state.session, &state.highlight_cache);
-                        update_statusbar(&mut state.doc, &state.session);
+                        let editor_h = editor_content_height(win_h);
+                        scroll_to_cursor(&mut state.session, editor_h);
                         state.needs_redraw = true;
                     }
                 }
@@ -372,8 +359,6 @@ impl ApplicationHandler for App {
                 let max_scroll = buf.line_count().saturating_sub(1);
                 buf.scroll_line = (buf.scroll_line as f32 + lines).round()
                     .clamp(0.0, max_scroll as f32) as usize;
-                buf.dirty = true;
-                update_editor(&mut state.doc, &state.session, &state.highlight_cache);
                 state.needs_redraw = true;
             }
             WindowEvent::Ime(ime_event) => {
@@ -383,9 +368,7 @@ impl ApplicationHandler for App {
                     Ime::Commit(text) => {
                         state.ime_preedit.clear();
                         state.session.active_mut().insert(&text);
-                        rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
-                        update_editor(&mut state.doc, &state.session, &state.highlight_cache);
-                        update_statusbar(&mut state.doc, &state.session);
+                        state.highlight_dirty = true;
                         state.needs_redraw = true;
                     }
                     Ime::Preedit(text, _cursor) => {
@@ -396,18 +379,27 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                state.redraw_in_flight = false;
+
                 let _ = state.session.tick();
                 let size = state.window.inner_size();
                 let w = size.width as f32;
                 let h = size.height as f32;
                 let scale = state.window.scale_factor() as f32;
 
+                // Sync doc from session before painting.
+                let editor_h = editor_content_height(h);
+                if state.highlight_dirty {
+                    state.highlight_dirty = false;
+                    rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
+                }
+                sync_doc_to_session(&mut state.doc, &state.session, &state.highlight_cache);
+
                 state.canvas.set_size(size.width, size.height, scale);
                 state.canvas.clear_rect(0, 0, size.width, size.height,
                     femtovg::Color::rgbf(0.15, 0.15, 0.18));
 
                 apply_styles(&mut state.doc.root, &state.sheet, &[], None);
-                let editor_h = editor_content_height(h);
                 update_scrollbar_styles(&mut state.doc.root, &state.session, editor_h);
                 let mut measurer = render::femtovg_measurer::SwashMeasurer {
                     sans_data: SANS_BYTES,
@@ -438,7 +430,6 @@ impl ApplicationHandler for App {
                     render::paint::paint_debug_boxes(&mut state.canvas, &lb);
                 }
 
-                // Paint text cursors and scrollbar on top.
                 let buf = state.session.active();
                 let scroll = buf.scroll_line;
                 if buf.cursor.line >= scroll {
@@ -450,6 +441,13 @@ impl ApplicationHandler for App {
 
                 state.canvas.flush();
                 state.gl_surface.swap_buffers(&state.gl_context).unwrap();
+
+                // Re-queue if input arrived during this render, then clear the flag.
+                if state.needs_redraw {
+                    state.needs_redraw = false;
+                    state.redraw_in_flight = true;
+                    state.window.request_redraw();
+                }
             }
             WindowEvent::Resized(size) => {
                 if size.width > 0 && size.height > 0 {
@@ -463,15 +461,20 @@ impl ApplicationHandler for App {
             }
             _ => {}
         }
-    }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Queue a redraw only if one isn't already in flight. If a render is
+        // already pending, the new state will be picked up when that render
+        // completes and re-checks needs_redraw. This prevents a 1000Hz mouse
+        // from continuously deferring RedrawRequested indefinitely.
         if let Some(state) = &mut self.state {
-            if state.needs_redraw {
-                state.needs_redraw = false;
+            if state.needs_redraw && !state.redraw_in_flight {
+                state.redraw_in_flight = true;
                 state.window.request_redraw();
             }
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let high_rate = self.state.as_ref()
             .and_then(|s| s.last_input)
             .map_or(false, |t| t.elapsed() < Duration::from_millis(100));
