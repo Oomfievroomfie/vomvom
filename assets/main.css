@@ -1,0 +1,116 @@
+/* vomvom main stylesheet */
+
+root {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(38, 38, 46, 1.0);
+}
+
+.toolbar {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    height: 32px;
+    background-color: rgba(51, 51, 64, 1.0);
+    padding: 0 6px;
+    gap: 6px;
+}
+
+.btn {
+    display: inline-block;
+    background-color: rgba(77, 77, 97, 1.0);
+    color: rgba(230, 230, 230, 1.0);
+    padding: 4px 10px;
+    border-radius: 3px;
+    font-size: 12px;
+}
+
+.tab-bar {
+    display: flex;
+    flex-direction: row;
+    height: 28px;
+    background-color: rgba(43, 43, 54, 1.0);
+}
+
+.tab {
+    display: inline-block;
+    padding: 6px 14px;
+    color: rgba(166, 166, 191, 1.0);
+    font-size: 12px;
+    background-color: rgba(43, 43, 54, 1.0);
+}
+
+.tab.active {
+    color: white;
+    background-color: rgba(33, 33, 41, 1.0);
+}
+
+.statusbar {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    height: 24px;
+    background-color: rgba(51, 102, 179, 1.0);
+    padding: 0 10px;
+    color: white;
+    font-size: 12px;
+}
+
+.editor {
+    flex-grow: 1;
+    background-color: rgba(33, 33, 41, 1.0);
+    padding: 16px;
+    font-family: monospace;
+    font-size: 14px;
+    color: rgba(217, 217, 230, 1.0);
+    overflow-y: hidden;
+}
+
+.line {
+    display: block;
+    line-height: 1.4;
+    font-size: 14px;
+}
+
+.cursor-line {
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.menu-header {
+    display: inline-block;
+    color: rgba(217, 217, 217, 1.0);
+    padding: 4px 10px;
+    font-size: 13px;
+}
+
+.menu-header.open {
+    background-color: rgba(77, 77, 128, 1.0);
+}
+
+.dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    background-color: rgba(56, 56, 71, 1.0);
+    border-width: 1px;
+    border-color: rgba(102, 102, 128, 1.0);
+    z-index: 100;
+    min-width: 180px;
+}
+
+.menu-item {
+    display: block;
+    color: rgba(230, 230, 230, 1.0);
+    padding: 6px 16px;
+    font-size: 13px;
+}
+
+.menu-separator {
+    display: block;
+    height: 1px;
+    background-color: rgba(89, 89, 115, 1.0);
+    margin: 3px 0;
+}

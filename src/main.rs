@@ -25,13 +25,13 @@ use winit::{
 
 use render::layout::{layout, finalize_positions, Constraints, LayoutBox};
 use render::paint::{PaintContext, paint_tree_root};
-use render::style::{
-    AlignItems, Color, Display, Edges, FlexDirection, JustifyContent, Length, Position, Selector,
-    Stylesheet, StyleDecl, Overflow,
-};
+use render::style::Stylesheet;
 use render::tree::{Node, apply_styles};
 use render::glyph_cache::GlyphCache;
+use render::css_parse::parse_stylesheet;
 use session::Session;
+
+static MAIN_CSS: &str = include_str!("../assets/main.css");
 
 static SANS_BYTES: &[u8] = include_bytes!("../OpenSans-Medium.ttf");
 static MONO_BYTES: &[u8] = include_bytes!("../FiraMono-Regular.ttf");
@@ -337,124 +337,7 @@ impl ApplicationHandler for App {
 }
 
 fn build_stylesheet() -> Stylesheet {
-    let mut sheet = Stylesheet::new();
-
-    sheet.add(Selector::Tag("root".into()), vec![
-        StyleDecl::Display(Display::Flex),
-        StyleDecl::FlexDirection(FlexDirection::Column),
-        StyleDecl::Width(Length::Percent(100.0)),
-        StyleDecl::Height(Length::Percent(100.0)),
-        StyleDecl::BackgroundColor(Color::rgb(0.15, 0.15, 0.18)),
-    ]);
-
-    sheet.add(Selector::Class("toolbar".into()), vec![
-        StyleDecl::Display(Display::Flex),
-        StyleDecl::FlexDirection(FlexDirection::Row),
-        StyleDecl::AlignItems(AlignItems::Center),
-        StyleDecl::Height(Length::Px(32.0)),
-        StyleDecl::BackgroundColor(Color::rgb(0.2, 0.2, 0.25)),
-        StyleDecl::Padding(Edges { left: Length::Px(6.0), right: Length::Px(6.0), top: Length::Zero, bottom: Length::Zero }),
-        StyleDecl::Gap(6.0),
-    ]);
-
-    sheet.add(Selector::Class("btn".into()), vec![
-        StyleDecl::Display(Display::InlineBlock),
-        StyleDecl::BackgroundColor(Color::rgb(0.3, 0.3, 0.38)),
-        StyleDecl::Color(Color::rgb(0.9, 0.9, 0.9)),
-        StyleDecl::Padding(Edges { left: Length::Px(10.0), right: Length::Px(10.0), top: Length::Px(4.0), bottom: Length::Px(4.0) }),
-        StyleDecl::BorderRadius(3.0),
-        StyleDecl::FontSize(12.0),
-    ]);
-
-    sheet.add(Selector::Class("tab-bar".into()), vec![
-        StyleDecl::Display(Display::Flex),
-        StyleDecl::FlexDirection(FlexDirection::Row),
-        StyleDecl::Height(Length::Px(28.0)),
-        StyleDecl::BackgroundColor(Color::rgb(0.17, 0.17, 0.21)),
-    ]);
-
-    sheet.add(Selector::Class("tab".into()), vec![
-        StyleDecl::Display(Display::InlineBlock),
-        StyleDecl::Padding(Edges { left: Length::Px(14.0), right: Length::Px(14.0), top: Length::Px(6.0), bottom: Length::Px(6.0) }),
-        StyleDecl::Color(Color::rgb(0.65, 0.65, 0.75)),
-        StyleDecl::FontSize(12.0),
-        StyleDecl::BackgroundColor(Color::rgb(0.17, 0.17, 0.21)),
-    ]);
-
-    sheet.add(Selector::And(vec![Selector::Class("tab".into()), Selector::Class("active".into())]), vec![
-        StyleDecl::Color(Color::WHITE),
-        StyleDecl::BackgroundColor(Color::rgb(0.13, 0.13, 0.16)),
-    ]);
-
-    sheet.add(Selector::Class("statusbar".into()), vec![
-        StyleDecl::Display(Display::Flex),
-        StyleDecl::FlexDirection(FlexDirection::Row),
-        StyleDecl::AlignItems(AlignItems::Center),
-        StyleDecl::JustifyContent(JustifyContent::SpaceBetween),
-        StyleDecl::Height(Length::Px(24.0)),
-        StyleDecl::BackgroundColor(Color::rgb(0.2, 0.4, 0.7)),
-        StyleDecl::Padding(Edges { left: Length::Px(10.0), right: Length::Px(10.0), top: Length::Zero, bottom: Length::Zero }),
-        StyleDecl::Color(Color::WHITE),
-        StyleDecl::FontSize(12.0),
-    ]);
-
-    sheet.add(Selector::Class("editor".into()), vec![
-        StyleDecl::FlexGrow(1.0),
-        StyleDecl::BackgroundColor(Color::rgb(0.13, 0.13, 0.16)),
-        StyleDecl::Padding(Edges::uniform_px(16.0)),
-        StyleDecl::FontFamily("monospace".into()),
-        StyleDecl::FontSize(14.0),
-        StyleDecl::Color(Color::rgb(0.85, 0.85, 0.9)),
-        StyleDecl::OverflowY(Overflow::Hidden),
-    ]);
-
-    sheet.add(Selector::Class("line".into()), vec![
-        StyleDecl::Display(Display::Block),
-        StyleDecl::LineHeight(1.4),
-        StyleDecl::FontSize(14.0),
-    ]);
-
-    sheet.add(Selector::Class("cursor-line".into()), vec![
-        StyleDecl::BackgroundColor(Color::rgba(1.0, 1.0, 1.0, 0.05)),
-    ]);
-
-    sheet.add(Selector::Class("menu-header".into()), vec![
-        StyleDecl::Display(Display::InlineBlock),
-        StyleDecl::Color(Color::rgb(0.85, 0.85, 0.85)),
-        StyleDecl::Padding(Edges { left: Length::Px(10.0), right: Length::Px(10.0), top: Length::Px(4.0), bottom: Length::Px(4.0) }),
-        StyleDecl::FontSize(13.0),
-    ]);
-
-    sheet.add(Selector::And(vec![Selector::Class("menu-header".into()), Selector::Class("open".into())]), vec![
-        StyleDecl::BackgroundColor(Color::rgb(0.3, 0.3, 0.5)),
-    ]);
-
-    sheet.add(Selector::Class("dropdown".into()), vec![
-        StyleDecl::Position(Position::Absolute),
-        StyleDecl::Top(Length::Percent(100.0)),
-        StyleDecl::Left(Length::Zero),
-        StyleDecl::BackgroundColor(Color::rgb(0.22, 0.22, 0.28)),
-        StyleDecl::BorderWidth(1.0),
-        StyleDecl::BorderColor(Color::rgb(0.4, 0.4, 0.5)),
-        StyleDecl::ZIndex(100),
-        StyleDecl::MinWidth(Length::Px(180.0)),
-    ]);
-
-    sheet.add(Selector::Class("menu-item".into()), vec![
-        StyleDecl::Display(Display::Block),
-        StyleDecl::Color(Color::rgb(0.9, 0.9, 0.9)),
-        StyleDecl::Padding(Edges { left: Length::Px(16.0), right: Length::Px(16.0), top: Length::Px(6.0), bottom: Length::Px(6.0) }),
-        StyleDecl::FontSize(13.0),
-    ]);
-
-    sheet.add(Selector::Class("menu-separator".into()), vec![
-        StyleDecl::Display(Display::Block),
-        StyleDecl::Height(Length::Px(1.0)),
-        StyleDecl::BackgroundColor(Color::rgb(0.35, 0.35, 0.45)),
-        StyleDecl::Margin(Edges { top: Length::Px(3.0), bottom: Length::Px(3.0), left: Length::Zero, right: Length::Zero }),
-    ]);
-
-    sheet
+    parse_stylesheet(MAIN_CSS)
 }
 
 fn build_scene(session: &Session, _sheet: &Stylesheet, open_menu: Option<&str>) -> Node {

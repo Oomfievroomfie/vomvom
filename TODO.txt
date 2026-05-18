@@ -8,21 +8,26 @@ Rendering engine:
   [x] OpenSans (sans) + FiraMono (mono) fonts embedded
   [x] femtovg swash feature enabled (used in F-key debug path)
   [x] Performance tests for layout/style (perf_layout_deep_tree, perf_layout_flat_flex, perf_style_cascade)
-  [ ] CSS-like declarative text language for stylesheets (instead of Rust StyleDecl API)
-  [ ] HTML-like declarative text language for UI layout (instead of building Node trees in Rust)
+  [x] CSS-like declarative text language for stylesheets (css_parse.rs; assets/main.css)
+  [x] HTML-like declarative text language for UI layout (html_parse.rs; parse_html() → Node tree)
 
 Hot exit (session):
   [x] SQLite schema + CRUD (WAL, bundled)
   [x] Buffer + undo/redo in-memory model
   [x] Session struct with sync logic
-  [ ] Wire session into event loop (open files, periodic sync, autoload on boot)
+  [x] Wire session into event loop (typing, undo/redo, Ctrl+O/S, periodic sync, autoload on boot)
 
-Editor (not started):
-  [ ] Actual text editing (cursor, input, selection)
-  [ ] File open/save
-  [ ] Syntax highlighting
+Editor (basic wired):
+  [x] Keyboard input (typing, backspace, delete, enter, arrows, home/end, ctrl+z/y/s/o)
+  [x] Cursor tracking (line/col display in statusbar)
+  [x] Multi-buffer tabs (tab bar, tab switching by click)
+  [x] File open via rfd native dialog (Ctrl+O / File > Open)
+  [x] File save (Ctrl+S / File > Save)
+  [x] Dropdown menus (File, Edit) with position:absolute overlay
+  [ ] Visual cursor rendering (blinking caret in editor)
+  [ ] Scrolling (editor content > window height)
   [ ] Line numbers
-  [ ] Scrolling
+  [ ] Syntax highlighting
 
 == ORIGINAL PROMPT (before any work began) ==
 
