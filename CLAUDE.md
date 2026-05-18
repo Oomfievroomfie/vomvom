@@ -8,7 +8,7 @@ Rust programming text editor. Two core systems:
 ## Key facts
 
 - Windows, PowerShell for system commands, bash-style paths for Bash tool
-- `cargo run -- --screenshot` renders to `screenshots/screenshot.png` (headless, no window)
+- `cargo run --release -- --screenshot` renders to `screenshots/screenshot.png` (headless, no window)
 - 60 tests: `cargo test`
 - Font: `OpenSans-Medium.ttf` in project root (embedded via `include_bytes!`)
 

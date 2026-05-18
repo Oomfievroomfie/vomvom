@@ -1,11 +1,14 @@
-// In-memory buffer: text content + undo/redo stack.
+// In-memory buffer: text content (ropey rope) + undo/redo stack.
+//
+// Pos::col is a char offset within the line (not byte offset).
 
 use crate::session::db::{OpKind, UndoOp};
+use ropey::Rope;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Pos {
     pub line: usize,
-    pub col: usize,
+    pub col: usize,  // char offset within line
 }
 
 impl Pos {
@@ -16,29 +19,23 @@ impl Pos {
 pub struct Buffer {
     pub id: i64,
     pub path: Option<String>,
-    /// Lines of the document. Always at least one element.
-    lines: Vec<String>,
+    rope: Rope,
     pub cursor: Pos,
     pub scroll_line: usize,
-    /// True if content differs from what's on disk.
     pub is_modified: bool,
-    /// True if this buffer has been modified since the last DB sync.
     pub dirty: bool,
 
-    // Undo stack: ops[0..=undo_head] are undoable; ops[undo_head+1..] are redoable.
-    // undo_head = usize::MAX means nothing is undoable.
     ops: Vec<UndoOp>,
-    undo_head: Option<usize>,  // index into ops of the last applied op
+    undo_head: Option<usize>,
     next_seq: i64,
 }
 
 impl Buffer {
     pub fn new(id: i64, path: Option<String>, content: &str) -> Self {
-        let lines = content_to_lines(content);
         Buffer {
             id,
             path,
-            lines,
+            rope: Rope::from_str(content),
             cursor: Pos::default(),
             scroll_line: 0,
             is_modified: false,
@@ -50,7 +47,6 @@ impl Buffer {
     }
 
     pub fn restore_undo(&mut self, ops: Vec<UndoOp>, current_seq: i64) {
-        // Rebuild undo_head from current_seq
         self.next_seq = ops.last().map(|o| o.seq + 1).unwrap_or(0);
         self.undo_head = if current_seq < 0 {
             None
@@ -61,24 +57,28 @@ impl Buffer {
     }
 
     pub fn content(&self) -> String {
-        self.lines.join("\n")
+        self.rope.to_string()
     }
 
     pub fn line_count(&self) -> usize {
-        self.lines.len()
+        // ropey counts a trailing newline as starting an extra line; match old behaviour.
+        self.rope.len_lines()
     }
 
-    pub fn line(&self, idx: usize) -> &str {
-        &self.lines[idx.min(self.lines.len().saturating_sub(1))]
+    /// Return line `idx` as a String, without the trailing newline.
+    pub fn line(&self, idx: usize) -> String {
+        let idx = idx.min(self.rope.len_lines().saturating_sub(1));
+        let slice = self.rope.line(idx);
+        // Strip trailing newline chars (\n or \r\n).
+        let s: String = slice.chars().collect();
+        s.trim_end_matches('\n').trim_end_matches('\r').to_string()
     }
 
-    // ── Editing ──────────────────────────────────────────────────────────────
+    // ── Editing ───────────────────────────────────────────────────────────────
 
-    /// Insert text at the current cursor position.
     pub fn insert(&mut self, text: &str) {
         let start = self.cursor;
         self.apply_insert(start, text);
-        // Record op — truncate any redo branch first
         self.truncate_redo();
         let end = self.cursor;
         let seq = self.next_seq;
@@ -97,11 +97,8 @@ impl Buffer {
         self.dirty = true;
     }
 
-    /// Delete the character before the cursor (backspace).
     pub fn backspace(&mut self) {
-        if self.cursor == (Pos::default()) {
-            return;
-        }
+        if self.cursor == Pos::default() { return; }
         let end = self.cursor;
         let start = self.prev_pos(end);
         let deleted = self.char_at(start).to_string();
@@ -123,7 +120,6 @@ impl Buffer {
         self.dirty = true;
     }
 
-    /// Delete the character at the cursor (delete key).
     pub fn delete_forward(&mut self) {
         let start = self.cursor;
         let end = self.next_pos(start);
@@ -155,14 +151,12 @@ impl Buffer {
         let op = self.ops[head].clone();
         match op.kind {
             OpKind::Insert => {
-                // Undo an insert = delete the inserted text
                 let start = Pos::new(op.line_start as usize, op.col_start as usize);
                 let end = Pos::new(op.line_end as usize, op.col_end as usize);
                 self.apply_delete(start, end);
                 self.cursor = start;
             }
             OpKind::Delete => {
-                // Undo a delete = re-insert the deleted text
                 let start = Pos::new(op.line_start as usize, op.col_start as usize);
                 self.apply_insert(start, &op.text.clone());
                 self.cursor = Pos::new(op.line_end as usize, op.col_end as usize);
@@ -199,16 +193,16 @@ impl Buffer {
     }
 
     pub fn move_cursor(&mut self, line: usize, col: usize) {
-        let line = line.min(self.lines.len().saturating_sub(1));
-        let col = col.min(self.lines[line].len());
+        let line = line.min(self.rope.len_lines().saturating_sub(1));
+        let line_len = self.rope.line(line).len_chars()
+            .saturating_sub(if self.rope.line(line).to_string().ends_with('\n') { 1 } else { 0 });
+        let col = col.min(line_len);
         self.cursor = Pos::new(line, col);
     }
 
-    // ── Undo serialization ───────────────────────────────────────────────────
+    // ── Undo serialization ────────────────────────────────────────────────────
 
-    pub fn undo_ops(&self) -> &[UndoOp] {
-        &self.ops
-    }
+    pub fn undo_ops(&self) -> &[UndoOp] { &self.ops }
 
     pub fn current_seq(&self) -> i64 {
         match self.undo_head {
@@ -217,7 +211,24 @@ impl Buffer {
         }
     }
 
-    // ── Internal helpers ─────────────────────────────────────────────────────
+    // ── Internal helpers ──────────────────────────────────────────────────────
+
+    fn pos_to_char(&self, pos: Pos) -> usize {
+        let line_start = self.rope.line_to_char(pos.line.min(self.rope.len_lines().saturating_sub(1)));
+        let line_len = self.rope.line(pos.line.min(self.rope.len_lines().saturating_sub(1))).len_chars();
+        // don't step past the newline at end of line
+        let max_col = line_len.saturating_sub(
+            if self.rope.line(pos.line.min(self.rope.len_lines().saturating_sub(1))).to_string().ends_with('\n') { 1 } else { 0 }
+        );
+        line_start + pos.col.min(max_col)
+    }
+
+    fn char_to_pos(&self, char_idx: usize) -> Pos {
+        let char_idx = char_idx.min(self.rope.len_chars());
+        let line = self.rope.char_to_line(char_idx);
+        let line_start = self.rope.line_to_char(line);
+        Pos::new(line, char_idx - line_start)
+    }
 
     fn truncate_redo(&mut self) {
         if let Some(h) = self.undo_head {
@@ -228,96 +239,44 @@ impl Buffer {
     }
 
     fn apply_insert(&mut self, at: Pos, text: &str) {
-        let new_lines = content_to_lines(text);
-        let tail = self.lines[at.line].split_off(at.col);
-
-        if new_lines.len() == 1 {
-            self.lines[at.line].push_str(&new_lines[0]);
-            self.lines[at.line].push_str(&tail);
-            self.cursor = Pos::new(at.line, at.col + new_lines[0].len());
-        } else {
-            self.lines[at.line].push_str(&new_lines[0]);
-            let last_new = new_lines.last().unwrap().clone() + &tail;
-            let extra: Vec<String> = new_lines[1..new_lines.len()-1].to_vec()
-                .into_iter().chain(std::iter::once(last_new)).collect();
-            let insert_at = at.line + 1;
-            for (i, l) in extra.into_iter().enumerate() {
-                self.lines.insert(insert_at + i, l);
-            }
-            let last_line = at.line + new_lines.len() - 1;
-            let last_col = new_lines.last().unwrap().len();
-            self.cursor = Pos::new(last_line, last_col);
-        }
+        let char_idx = self.pos_to_char(at);
+        self.rope.insert(char_idx, text);
+        let text_chars = text.chars().count();
+        self.cursor = self.char_to_pos(char_idx + text_chars);
     }
 
     fn apply_delete(&mut self, start: Pos, end: Pos) {
-        if start == end { return; }
-        if start.line == end.line {
-            self.lines[start.line].drain(start.col..end.col);
-        } else {
-            let tail = self.lines[end.line][end.col..].to_string();
-            self.lines[start.line].truncate(start.col);
-            self.lines[start.line].push_str(&tail);
-            self.lines.drain(start.line + 1..=end.line);
+        let sc = self.pos_to_char(start);
+        let ec = self.pos_to_char(end);
+        if sc < ec {
+            self.rope.remove(sc..ec);
         }
         self.cursor = start;
     }
 
     fn char_at(&self, pos: Pos) -> char {
-        if pos.line < self.lines.len() {
-            let line = &self.lines[pos.line];
-            if pos.col < line.len() {
-                return line[pos.col..].chars().next().unwrap_or('\n');
-            }
-        }
-        '\n'
+        let ci = self.pos_to_char(pos);
+        self.rope.char(ci.min(self.rope.len_chars().saturating_sub(1)))
     }
 
     fn prev_pos(&self, pos: Pos) -> Pos {
-        if pos.col > 0 {
-            // step back one char
-            let line = &self.lines[pos.line];
-            let byte_idx = line[..pos.col].char_indices().next_back().map(|(i,_)| i).unwrap_or(0);
-            Pos::new(pos.line, byte_idx)
-        } else if pos.line > 0 {
-            let prev_line = pos.line - 1;
-            Pos::new(prev_line, self.lines[prev_line].len())
-        } else {
-            pos
-        }
+        let ci = self.pos_to_char(pos);
+        if ci == 0 { return pos; }
+        self.char_to_pos(ci - 1)
     }
 
     fn next_pos(&self, pos: Pos) -> Pos {
-        if pos.line < self.lines.len() {
-            let line = &self.lines[pos.line];
-            if pos.col < line.len() {
-                let next_col = pos.col + line[pos.col..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-                Pos::new(pos.line, next_col)
-            } else if pos.line + 1 < self.lines.len() {
-                Pos::new(pos.line + 1, 0)
-            } else {
-                pos
-            }
-        } else {
-            pos
-        }
+        let ci = self.pos_to_char(pos);
+        if ci >= self.rope.len_chars() { return pos; }
+        self.char_to_pos(ci + 1)
     }
-}
-
-fn content_to_lines(content: &str) -> Vec<String> {
-    if content.is_empty() {
-        return vec![String::new()];
-    }
-    content.split('\n').map(|s| s.to_string()).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn buf(content: &str) -> Buffer {
-        Buffer::new(1, None, content)
-    }
+    fn buf(content: &str) -> Buffer { Buffer::new(1, None, content) }
 
     #[test]
     fn test_insert_simple() {
@@ -397,13 +356,10 @@ mod tests {
         b.insert("a");
         b.insert("b");
         b.insert("c");
-        assert!(b.undo());
-        assert_eq!(b.content(), "ab");
-        assert!(b.undo());
-        assert_eq!(b.content(), "a");
-        assert!(b.undo());
-        assert_eq!(b.content(), "");
-        assert!(!b.undo()); // nothing left to undo
+        assert!(b.undo()); assert_eq!(b.content(), "ab");
+        assert!(b.undo()); assert_eq!(b.content(), "a");
+        assert!(b.undo()); assert_eq!(b.content(), "");
+        assert!(!b.undo());
     }
 
     #[test]
@@ -412,22 +368,16 @@ mod tests {
         b.insert("a");
         b.insert("b");
         b.undo();
-        b.insert("c"); // this should clear the redo branch
+        b.insert("c");
         assert!(!b.redo());
         assert_eq!(b.content(), "ac");
     }
 
     #[test]
-    fn test_undo_nothing() {
-        let mut b = buf("hello");
-        assert!(!b.undo());
-    }
+    fn test_undo_nothing() { assert!(!buf("hello").undo()); }
 
     #[test]
-    fn test_redo_nothing() {
-        let mut b = buf("hello");
-        assert!(!b.redo());
-    }
+    fn test_redo_nothing() { assert!(!buf("hello").redo()); }
 
     #[test]
     fn test_multiline_insert() {
@@ -456,14 +406,10 @@ mod tests {
     fn test_current_seq_tracks_undo() {
         let mut b = buf("");
         assert_eq!(b.current_seq(), -1);
-        b.insert("a");
-        assert_eq!(b.current_seq(), 0);
-        b.insert("b");
-        assert_eq!(b.current_seq(), 1);
-        b.undo();
-        assert_eq!(b.current_seq(), 0);
-        b.undo();
-        assert_eq!(b.current_seq(), -1);
+        b.insert("a"); assert_eq!(b.current_seq(), 0);
+        b.insert("b"); assert_eq!(b.current_seq(), 1);
+        b.undo();      assert_eq!(b.current_seq(), 0);
+        b.undo();      assert_eq!(b.current_seq(), -1);
     }
 
     #[test]
@@ -471,14 +417,11 @@ mod tests {
         let mut b = buf("");
         b.insert("hello");
         b.insert(" world");
-        let ops: Vec<UndoOp> = b.undo_ops().to_vec();
+        let ops = b.undo_ops().to_vec();
         let seq = b.current_seq();
-
         let mut b2 = buf("hello world");
         b2.restore_undo(ops, seq);
-        assert!(b2.undo());
-        assert_eq!(b2.content(), "hello");
-        assert!(b2.undo());
-        assert_eq!(b2.content(), "");
+        assert!(b2.undo()); assert_eq!(b2.content(), "hello");
+        assert!(b2.undo()); assert_eq!(b2.content(), "");
     }
 }

@@ -3,9 +3,10 @@ mod screenshot;
 mod session;
 
 use std::num::NonZeroU32;
+use std::time::{Duration, Instant};
 use std::sync::Arc;
 
-use femtovg::{renderer::OpenGl, Canvas, FontId};
+use femtovg::{renderer::OpenGl, Canvas, FontId, Paint, Path};
 use glutin::{
     config::ConfigTemplateBuilder,
     context::{ContextApi, ContextAttributesBuilder, PossiblyCurrentContext},
@@ -19,7 +20,7 @@ use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
     event::{ElementState, Modifiers, WindowEvent},
-    event_loop::{ActiveEventLoop, EventLoop},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     window::{Window, WindowId},
 };
 
@@ -37,7 +38,7 @@ static DROPDOWN_FILE: &str = include_str!("../assets/dropdown_file.htmv");
 static DROPDOWN_EDIT: &str = include_str!("../assets/dropdown_edit.htmv");
 
 static SANS_BYTES: &[u8] = include_bytes!("../OpenSans-Medium.ttf");
-static MONO_BYTES: &[u8] = include_bytes!("../FiraMono-Regular.ttf");
+static MONO_BYTES: &[u8] = include_bytes!("../FiraMono-Medium.ttf");
 
 struct App {
     state: Option<AppState>,
@@ -60,6 +61,10 @@ struct AppState {
     modifiers: Modifiers,
     mouse_pos: (f32, f32),
     last_layout: Option<LayoutBox>,
+    needs_redraw: bool,
+    ime_preedit: String,
+    debug_boxes: bool,
+    scrollbar_drag: bool,
 }
 
 impl App {
@@ -91,6 +96,7 @@ impl ApplicationHandler for App {
             .expect("failed to create window");
 
         let window = Arc::new(window.unwrap());
+        window.set_ime_allowed(true);
         let raw_handle = window.window_handle().unwrap();
 
         let ctx_attrs = ContextAttributesBuilder::new().build(Some(raw_handle.as_raw()));
@@ -143,7 +149,7 @@ impl ApplicationHandler for App {
             gl_context,
             glyph_cache: GlyphCache::new(),
             hint: true,
-            use_femtovg: false,
+            use_femtovg: true,
             femtovg_fonts: None,
             sheet,
             session,
@@ -151,6 +157,10 @@ impl ApplicationHandler for App {
             modifiers: Modifiers::default(),
             mouse_pos: (0.0, 0.0),
             last_layout: None,
+            needs_redraw: true,
+            ime_preedit: String::new(),
+            debug_boxes: false,
+            scrollbar_drag: false,
         });
     }
 
@@ -176,24 +186,29 @@ impl ApplicationHandler for App {
                     Key::Character(s) if ctrl && (s == "o" || s == "O") => {
                         open_file_dialog(&mut state.session);
                         sync_doc_to_session(&mut state.doc, &state.session);
-                        state.window.request_redraw();
+                        state.needs_redraw = true;
                         return;
                     }
                     Key::Character(s) if ctrl && (s == "s" || s == "S") => {
                         let _ = state.session.save_active();
                         update_statusbar(&mut state.doc, &state.session);
-                        state.window.request_redraw();
+                        state.needs_redraw = true;
                         return;
                     }
                     Key::Character(s) if ctrl && (s == "f" || s == "F") => {
                         state.use_femtovg = !state.use_femtovg;
-                        state.window.request_redraw();
+                        state.needs_redraw = true;
                         return;
                     }
                     Key::Character(s) if ctrl && (s == "h" || s == "H") => {
                         state.hint = !state.hint;
                         state.glyph_cache = GlyphCache::new();
-                        state.window.request_redraw();
+                        state.needs_redraw = true;
+                        return;
+                    }
+                    Key::Character(s) if ctrl && (s == "d" || s == "D") => {
+                        state.debug_boxes = !state.debug_boxes;
+                        state.needs_redraw = true;
                         return;
                     }
                     _ => {}
@@ -203,7 +218,7 @@ impl ApplicationHandler for App {
                 match &key {
                     Key::Named(NamedKey::Escape) => {
                         close_all_menus(&mut state.doc);
-                        state.window.request_redraw();
+                        state.needs_redraw = true;
                         return;
                     }
                     Key::Character(s) if ctrl && (s == "z" || s == "Z") => { buf.undo(); }
@@ -214,12 +229,12 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::Tab) => { buf.insert("    "); }
                     Key::Named(NamedKey::ArrowLeft) => {
                         let pos = buf.cursor;
-                        let (l, c) = if pos.col > 0 { (pos.line, pos.col - 1) } else if pos.line > 0 { (pos.line - 1, buf.line(pos.line - 1).len()) } else { (0, 0) };
+                        let (l, c) = if pos.col > 0 { (pos.line, pos.col - 1) } else if pos.line > 0 { (pos.line - 1, buf.line(pos.line - 1).chars().count()) } else { (0, 0) };
                         buf.move_cursor(l, c);
                     }
                     Key::Named(NamedKey::ArrowRight) => {
                         let pos = buf.cursor;
-                        let line_len = buf.line(pos.line).len();
+                        let line_len = buf.line(pos.line).chars().count();
                         let (l, c) = if pos.col < line_len { (pos.line, pos.col + 1) } else if pos.line + 1 < buf.line_count() { (pos.line + 1, 0) } else { (pos.line, pos.col) };
                         buf.move_cursor(l, c);
                     }
@@ -237,20 +252,41 @@ impl ApplicationHandler for App {
                     }
                     Key::Named(NamedKey::End) => {
                         let line = buf.cursor.line;
-                        let len = buf.line(line).len();
+                        let len = buf.line(line).chars().count();
                         buf.move_cursor(line, len);
                     }
                     Key::Character(s) if !ctrl => { buf.insert(s); }
                     _ => { dirty = false; }
                 }
                 if dirty {
+                    let editor_h = editor_content_height(state.window.inner_size().height as f32);
+                    scroll_to_cursor(&mut state.session, editor_h);
                     update_editor(&mut state.doc, &state.session);
                     update_statusbar(&mut state.doc, &state.session);
-                    state.window.request_redraw();
+                    state.needs_redraw = true;
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 state.mouse_pos = (position.x as f32, position.y as f32);
+                if state.scrollbar_drag {
+                    let (mx, my) = state.mouse_pos;
+                    let win_h = state.window.inner_size().height as f32;
+                    if let Some(ref lb) = state.last_layout.clone() {
+                        if let Some(track_lb) = scrollbar_track_lb(lb, mx, my)
+                            .or_else(|| lb.children.get(2).and_then(|e| e.children.last()))
+                        {
+                            let track_lb = track_lb.clone();
+                            let scroll = scrollbar_y_to_scroll(&track_lb, &state.session, my, win_h);
+                            state.session.active_mut().scroll_line = scroll;
+                            state.session.active_mut().dirty = true;
+                            update_editor(&mut state.doc, &state.session);
+                            state.needs_redraw = true;
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state: ElementState::Released, button: winit::event::MouseButton::Left, .. } => {
+                state.scrollbar_drag = false;
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: winit::event::MouseButton::Left, .. } => {
                 let (mx, my) = state.mouse_pos;
@@ -261,30 +297,79 @@ impl ApplicationHandler for App {
                             close_all_menus(&mut state.doc);
                             execute_menu_action(&action, &mut state.session);
                             sync_doc_to_session(&mut state.doc, &state.session);
-                            state.window.request_redraw();
+                            state.needs_redraw = true;
                             return;
                         }
                         close_all_menus(&mut state.doc);
-                        state.window.request_redraw();
+                        state.needs_redraw = true;
                         return;
                     }
                     // Menu header click?
                     if let Some(menu_id) = hit_test_menu_header(&state.doc.root, lb, mx, my) {
                         open_menu(&mut state.doc, &menu_id);
-                        state.window.request_redraw();
+                        state.needs_redraw = true;
                         return;
                     }
                     // Tab click?
                     if let Some(idx) = hit_test_tab(&state.doc.root, lb, mx, my) {
                         state.session.set_active(idx);
                         sync_doc_to_session(&mut state.doc, &state.session);
-                        state.window.request_redraw();
+                        state.needs_redraw = true;
+                        return;
                     }
+                    // Scrollbar track click — jump scroll position and start drag.
+                    let win_h = state.window.inner_size().height as f32;
+                    if let Some(track_lb) = scrollbar_track_lb(lb, mx, my) {
+                        let track_lb = track_lb.clone();
+                        let scroll = scrollbar_y_to_scroll(&track_lb, &state.session, my, win_h);
+                        state.session.active_mut().scroll_line = scroll;
+                        state.session.active_mut().dirty = true;
+                        state.scrollbar_drag = true;
+                        update_editor(&mut state.doc, &state.session);
+                        state.needs_redraw = true;
+                    // Editor click — place cursor.
+                    } else if let Some((line, col)) = hit_test_editor(lb, &state.session, mx, my, MONO_BYTES) {
+                        state.session.active_mut().move_cursor(line, col);
+                        scroll_to_cursor(&mut state.session, editor_content_height(win_h));
+                        update_editor(&mut state.doc, &state.session);
+                        update_statusbar(&mut state.doc, &state.session);
+                        state.needs_redraw = true;
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                use winit::event::MouseScrollDelta;
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => -y as f32,
+                    MouseScrollDelta::PixelDelta(pos) => -pos.y as f32 / 20.0,
+                };
+                let buf = state.session.active_mut();
+                let max_scroll = buf.line_count().saturating_sub(1);
+                buf.scroll_line = (buf.scroll_line as f32 + lines).round()
+                    .clamp(0.0, max_scroll as f32) as usize;
+                buf.dirty = true;
+                update_editor(&mut state.doc, &state.session);
+                state.needs_redraw = true;
+            }
+            WindowEvent::Ime(ime_event) => {
+                use winit::event::Ime;
+                match ime_event {
+                    Ime::Commit(text) => {
+                        state.ime_preedit.clear();
+                        state.session.active_mut().insert(&text);
+                        update_editor(&mut state.doc, &state.session);
+                        update_statusbar(&mut state.doc, &state.session);
+                        state.needs_redraw = true;
+                    }
+                    Ime::Preedit(text, _cursor) => {
+                        state.ime_preedit = text;
+                        state.needs_redraw = true;
+                    }
+                    _ => {}
                 }
             }
             WindowEvent::RedrawRequested => {
                 let _ = state.session.tick();
-
                 let size = state.window.inner_size();
                 let w = size.width as f32;
                 let h = size.height as f32;
@@ -295,6 +380,8 @@ impl ApplicationHandler for App {
                     femtovg::Color::rgbf(0.15, 0.15, 0.18));
 
                 apply_styles(&mut state.doc.root, &state.sheet, &[], None);
+                let editor_h = editor_content_height(h);
+                update_scrollbar_styles(&mut state.doc.root, &state.session, editor_h);
                 let mut measurer = render::femtovg_measurer::SwashMeasurer {
                     sans_data: SANS_BYTES,
                     mono_data: MONO_BYTES,
@@ -320,6 +407,20 @@ impl ApplicationHandler for App {
                 };
                 paint_tree_root(&mut ctx, &state.doc.root, &lb);
 
+                if state.debug_boxes {
+                    render::paint::paint_debug_boxes(&mut state.canvas, &lb);
+                }
+
+                // Paint text cursors and scrollbar on top.
+                let buf = state.session.active();
+                let scroll = buf.scroll_line;
+                if buf.cursor.line >= scroll {
+                    let line_text = buf.line(buf.cursor.line);
+                    let layout_line = buf.cursor.line - scroll;
+                    let cursors = vec![(layout_line, buf.cursor.col, line_text.as_str())];
+                    paint_cursors_with_text(&mut state.canvas, &lb, &cursors, MONO_BYTES);
+                }
+
                 state.canvas.flush();
                 state.gl_surface.swap_buffers(&state.gl_context).unwrap();
             }
@@ -330,17 +431,23 @@ impl ApplicationHandler for App {
                         NonZeroU32::new(size.width).unwrap(),
                         NonZeroU32::new(size.height).unwrap(),
                     );
-                    state.window.request_redraw();
+                    state.needs_redraw = true;
                 }
             }
             _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(state) = &self.state {
-            state.window.request_redraw();
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(state) = &mut self.state {
+            if state.needs_redraw {
+                state.needs_redraw = false;
+                state.window.request_redraw();
+            }
         }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + Duration::from_millis(250),
+        ));
     }
 }
 
@@ -401,20 +508,77 @@ fn make_tab_node(b: &session::buffer::Buffer, idx: usize, active: bool) -> Node 
     tab
 }
 
+const SCROLLBAR_MIN_THUMB_PX: f32 = 32.0;
+
+/// Returns (thumb_top_px, thumb_h_px) relative to track top, or None if no scrollbar needed.
+/// thumb_h_px accounts for the same minimum as the CSS min-height so top is always correct.
+fn scrollbar_thumb_geometry(total: usize, scroll: usize, visible: usize, track_h: f32) -> Option<(f32, f32)> {
+    if total <= visible { return None; }
+    let thumb_h = (visible as f32 / total as f32 * track_h).max(SCROLLBAR_MIN_THUMB_PX.min(track_h));
+    let travel = track_h - thumb_h;
+    let max_scroll = (total - visible) as f32;
+    let top = if max_scroll > 0.0 { scroll as f32 / max_scroll * travel } else { 0.0 };
+    Some((top, thumb_h))
+}
+
+fn update_scrollbar_styles(root: &mut Node, session: &Session, editor_h: f32) {
+    let buf = session.active();
+    let total = buf.line_count();
+    let visible = visible_lines(editor_h);
+
+    let Some(thumb) = root.get_element_by_id("scrollbar-thumb") else { return };
+    let Some((top_px, thumb_h_px)) = scrollbar_thumb_geometry(total, buf.scroll_line, visible, editor_h) else {
+        thumb.style.display = render::style::Display::None;
+        return;
+    };
+    thumb.style.display = render::style::Display::Block;
+    thumb.style.top = render::style::Length::Percent(top_px / editor_h * 100.0);
+    thumb.style.height = render::style::Length::Percent(thumb_h_px / editor_h * 100.0);
+}
+
+/// Height of the editor content area (inside padding) — equals the scrollbar track height.
+fn editor_content_height(window_h: f32) -> f32 {
+    // toolbar 32 + tab-bar 28 + statusbar 24 = 84px fixed chrome; editor padding 16px top+bottom
+    (window_h - 84.0 - 32.0).max(0.0)
+}
+
+fn visible_lines(editor_content_h: f32) -> usize {
+    let line_h = 11.5f32 * 1.4f32;
+    (editor_content_h / line_h).floor().max(1.0) as usize
+}
+
+// Scroll so the cursor line is visible, given the editor's pixel height.
+fn scroll_to_cursor(session: &mut Session, editor_h: f32) {
+    let visible_lines = visible_lines(editor_h);
+    let buf = session.active_mut();
+    let cursor_line = buf.cursor.line;
+    if cursor_line < buf.scroll_line {
+        buf.scroll_line = cursor_line;
+        buf.dirty = true;
+    } else if cursor_line >= buf.scroll_line + visible_lines {
+        buf.scroll_line = cursor_line + 1 - visible_lines;
+        buf.dirty = true;
+    }
+}
+
 // --- Targeted document mutation functions ---
 
 fn update_editor_node(root: &mut Node, session: &Session) {
     let buf = session.active();
     let cursor = buf.cursor;
+    let scroll = buf.scroll_line;
     let Some(editor) = root.get_element_by_id("editor") else { return };
     editor.clear_children();
-    for i in 0..buf.line_count() {
-        let text = buf.line(i).to_string();
+    for i in scroll..buf.line_count() {
+        let text = buf.line(i);
         let mut line_node = Node::element("div").with_class("line");
         if i == cursor.line { line_node = line_node.with_class("cursor-line"); }
         line_node = line_node.with_child(Node::text(if text.is_empty() { " ".into() } else { text }));
         editor.append_child(line_node);
     }
+    let scrollbar = Node::element("div").with_class("scrollbar-track").with_id("scrollbar-track")
+        .with_child(Node::element("div").with_class("scrollbar-thumb").with_id("scrollbar-thumb"));
+    editor.append_child(scrollbar);
 }
 
 fn update_statusbar_node(root: &mut Node, session: &Session) {
@@ -615,6 +779,107 @@ fn hit_test_tab(root: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<usize> 
     None
 }
 
+
+/// Paint cursor bars at the given (line, col, text) positions over the editor area.
+fn paint_cursors_with_text(
+    canvas: &mut Canvas<OpenGl>,
+    lb: &LayoutBox,
+    cursors: &[(usize, usize, &str)], // (line_idx, col, line_text)
+    mono_data: &'static [u8],
+) {
+    let Some(editor_lb) = lb.children.get(2) else { return };
+
+    let cursor_color = femtovg::Color::rgbaf(0.9, 0.9, 1.0, 0.85);
+    let font_size = 11.5f32;
+
+    for &(line_idx, col, line_text) in cursors {
+        let Some(line_lb) = editor_lb.children.get(line_idx) else { continue };
+        let line_h = line_lb.border_box.h;
+        let line_top = line_lb.border_box.y;
+
+        let prefix: String = line_text.chars().take(col).collect();
+        let x_off = render::glyph_cache::measure_text_width(mono_data, &prefix, font_size);
+        let cursor_x = line_lb.content.x + x_off;
+
+        let mut path = Path::new();
+        path.rect(cursor_x, line_top, 2.0, line_h);
+        let paint = Paint::color(cursor_color);
+        canvas.fill_path(&path, &paint);
+    }
+}
+
+/// Returns the track LayoutBox if mx,my is inside the scrollbar track.
+fn scrollbar_track_lb<'a>(lb: &'a LayoutBox, mx: f32, my: f32) -> Option<&'a LayoutBox> {
+    let editor_lb = lb.children.get(2)?;
+    let track_lb = editor_lb.children.last()?;
+    if track_lb.border_box.contains(mx, my) { Some(track_lb) } else { None }
+}
+
+/// Map a click at my inside the track to a scroll_line, centering the thumb on the click.
+fn scrollbar_y_to_scroll(track_lb: &LayoutBox, session: &Session, my: f32, window_h: f32) -> usize {
+    let buf = session.active();
+    let total = buf.line_count();
+    let visible = visible_lines(editor_content_height(window_h));
+    let track_h = track_lb.border_box.h;
+    let max_scroll = (total.saturating_sub(visible)) as f32;
+    if max_scroll <= 0.0 { return 0; }
+    let (_, thumb_h) = scrollbar_thumb_geometry(total, buf.scroll_line, visible, track_h)
+        .unwrap_or((0.0, 0.0));
+    let travel = track_h - thumb_h;
+    if travel <= 0.0 { return 0; }
+    // Center thumb on click point.
+    let rel_y = (my - track_lb.border_box.y - thumb_h / 2.0).clamp(0.0, travel);
+    (rel_y / travel * max_scroll).round() as usize
+}
+
+/// Hit-test a mouse click in the editor area; return (line, col).
+fn hit_test_editor(
+    lb: &LayoutBox,
+    session: &Session,
+    mx: f32,
+    my: f32,
+    mono_data: &'static [u8],
+) -> Option<(usize, usize)> {
+    let editor_lb = lb.children.get(2)?;
+    if !editor_lb.border_box.contains(mx, my) { return None; }
+
+    let buf = session.active();
+    let scroll = buf.scroll_line;
+    let font_size = 11.5f32;
+
+    // Last child is the scrollbar track (absolutely positioned), not a text line.
+    let line_count = editor_lb.children.len().saturating_sub(1);
+    if line_count == 0 { return Some((0, 0)); }
+
+    let mut best_layout_line = 0;
+    for (i, line_lb) in editor_lb.children[..line_count].iter().enumerate() {
+        if my >= line_lb.border_box.y {
+            best_layout_line = i;
+        }
+    }
+
+    let buf_line = best_layout_line + scroll;
+    let line_text = buf.line(buf_line);
+    let line_lb = &editor_lb.children[best_layout_line];
+    let local_x = mx - line_lb.content.x;
+
+    let chars: Vec<char> = line_text.chars().collect();
+    let mut best_col = 0;
+    let mut best_dist = f32::INFINITY;
+
+    for col in 0..=chars.len() {
+        let prefix: String = chars[..col].iter().collect();
+        let x = render::glyph_cache::measure_text_width(mono_data, &prefix, font_size);
+        let dist = (x - local_x).abs();
+        if dist < best_dist {
+            best_dist = dist;
+            best_col = col;
+        }
+    }
+
+    Some((buf_line, best_col))
+}
+
 fn dirs_or_local() -> std::path::PathBuf {
     // Try %APPDATA% on Windows, ~/.local/share on Linux, else cwd.
     if let Some(dir) = std::env::var_os("APPDATA") {
@@ -630,4 +895,114 @@ fn dirs_or_local() -> std::path::PathBuf {
         return p;
     }
     std::path::PathBuf::from(".")
+}
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+    use std::time::Instant;
+    use render::layout::{layout, finalize_positions, Constraints};
+    use render::tree::apply_styles;
+    use render::css_parse::parse_stylesheet;
+    use render::glyph_cache::measure_text_width;
+
+    static MAIN_RS: &str = include_str!("main.rs");
+
+    fn time_iters<F: FnMut()>(label: &str, iters: u32, mut f: F) {
+        let t = Instant::now();
+        for _ in 0..iters { f(); }
+        let elapsed = t.elapsed();
+        println!("{label}: {:.2}ms total over {iters} iters = {:.3}ms/iter",
+            elapsed.as_secs_f64() * 1000.0,
+            elapsed.as_secs_f64() * 1000.0 / iters as f64);
+    }
+
+    #[test]
+    fn perf_measure_text_width_per_line() {
+        let lines: Vec<&str> = MAIN_RS.lines().collect();
+        let iters = 100u32;
+        time_iters("measure_text_width uncached (all lines × 100)", iters, || {
+            for line in &lines {
+                measure_text_width(MONO_BYTES, line, 11.5);
+            }
+        });
+        println!("  ({} lines)", lines.len());
+    }
+
+    #[test]
+    fn perf_style_cascade_and_layout() {
+        let sheet = parse_stylesheet(MAIN_CSS);
+        let mut session = Session::open(":memory:").unwrap();
+        // Load each line so the buffer has the right line structure.
+        for line in MAIN_RS.lines() {
+            session.active_mut().insert(line);
+            session.active_mut().insert("\n");
+        }
+        let mut doc = Document::new(build_initial_document(&session));
+        let iters = 20u32;
+        time_iters("apply_styles + layout (full frame × 20)", iters, || {
+            apply_styles(&mut doc.root, &sheet, &[], None);
+            let mut measurer = render::femtovg_measurer::SwashMeasurer {
+                sans_data: SANS_BYTES,
+                mono_data: MONO_BYTES,
+            };
+            let mut lb = layout(&doc.root, Constraints::new(1024.0, 768.0), &mut measurer);
+            finalize_positions(&mut lb);
+            let _ = lb;
+        });
+    }
+
+    #[test]
+    fn perf_measure_width_vs_line_count() {
+        let lines: Vec<String> = MAIN_RS.lines().map(|s| s.to_string()).collect();
+        let total_chars: usize = lines.iter().map(|l| l.chars().count()).sum();
+        println!("\nmain.rs: {} lines, {} chars", lines.len(), total_chars);
+
+        // Baseline: single measure pass.
+        let t = Instant::now();
+        for line in &lines {
+            measure_text_width(MONO_BYTES, line, 11.5);
+        }
+        println!("Single measure pass (uncached): {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
+
+        // Cost of FontRef::from_index per call.
+        let iters = lines.len() as u32;
+        let t = Instant::now();
+        for _ in 0..iters {
+            swash::FontRef::from_index(MONO_BYTES, 0);
+        }
+        println!("FontRef::from_index × {} (once per line): {:.2}ms", iters, t.elapsed().as_secs_f64() * 1000.0);
+
+        // Cost of glyph_metrics setup per call (charmap + glyph_metrics scaled).
+        let font_ref = swash::FontRef::from_index(MONO_BYTES, 0).unwrap();
+        let t = Instant::now();
+        for _ in 0..iters {
+            let _cm = font_ref.charmap();
+            let _gm = font_ref.glyph_metrics(&[]).scale(11.5);
+        }
+        println!("charmap + glyph_metrics().scale() × {} (once per line): {:.2}ms", iters, t.elapsed().as_secs_f64() * 1000.0);
+
+        // Cost of just advance_width calls for all chars (with metrics already built).
+        let charmap = font_ref.charmap();
+        let gm = font_ref.glyph_metrics(&[]).scale(11.5);
+        let t = Instant::now();
+        for line in &lines {
+            for ch in line.chars() {
+                let _ = gm.advance_width(charmap.map(ch));
+            }
+        }
+        println!("advance_width per char ({} chars, metrics pre-built): {:.2}ms", total_chars, t.elapsed().as_secs_f64() * 1000.0);
+
+        // Cost of advance_width with per-glyph HashMap caching (pre-built metrics, cached advances).
+        let mut adv_cache: std::collections::HashMap<u16, f32> = std::collections::HashMap::new();
+        let t = Instant::now();
+        for line in &lines {
+            for ch in line.chars() {
+                let gid = charmap.map(ch);
+                adv_cache.entry(gid).or_insert_with(|| gm.advance_width(gid));
+            }
+        }
+        let cached_total: f32 = lines.iter().flat_map(|l| l.chars()).map(|ch| adv_cache[&charmap.map(ch)]).sum();
+        println!("advance_width cached via HashMap ({} chars): {:.2}ms, sum={:.1}", total_chars, t.elapsed().as_secs_f64() * 1000.0, cached_total);
+    }
 }

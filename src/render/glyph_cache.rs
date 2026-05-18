@@ -170,6 +170,7 @@ impl GlyphCache {
         self.glyphs.get(&key).copied().flatten()
     }
 
+
     /// Upload dirty atlas data to GPU.
     pub fn flush(&mut self, canvas: &mut Canvas<OpenGl>) {
         if !self.dirty {

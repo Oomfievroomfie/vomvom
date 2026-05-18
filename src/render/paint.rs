@@ -100,6 +100,8 @@ fn paint_absolute_overlay(ctx: &mut PaintContext, node: &Node, lb: &LayoutBox) {
         let child_lb = &lb.children[i];
         if child_node.style.position == Position::Absolute {
             paint_tree(ctx, child_node, child_lb);
+            // Also recurse into this absolute node's own absolute descendants.
+            paint_absolute_overlay(ctx, child_node, child_lb);
         } else {
             paint_absolute_overlay(ctx, child_node, child_lb);
         }
@@ -189,4 +191,21 @@ pub fn paint_tree(ctx: &mut PaintContext, node: &Node, lb: &LayoutBox) {
 
 fn rounded_rect(path: &mut Path, r: Rect, radius: f32) {
     path.rounded_rect(r.x, r.y, r.w, r.h, radius);
+}
+
+/// Draw a red 1px stroke rect outline.
+fn debug_rect(canvas: &mut Canvas<OpenGl>, r: Rect) {
+    if r.w <= 0.0 || r.h <= 0.0 { return; }
+    let mut path = Path::new();
+    path.rect(r.x, r.y, r.w, r.h);
+    let paint = Paint::color(femtovg::Color::rgba(255, 0, 0, 200));
+    canvas.stroke_path(&path, &paint);
+}
+
+/// Recursively draw red border_box outlines over every layout box.
+pub fn paint_debug_boxes(canvas: &mut Canvas<OpenGl>, lb: &LayoutBox) {
+    debug_rect(canvas, lb.border_box);
+    for child in &lb.children {
+        paint_debug_boxes(canvas, child);
+    }
 }

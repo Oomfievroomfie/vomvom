@@ -170,8 +170,13 @@ fn layout_element(node: &Node, constraints: Constraints, measurer: &mut dyn Text
         });
     let inner_h = clamp_size(inner_h, s.min_height, s.max_height, constraints.available_h);
 
-    // Lay out absolutely positioned children — containing block is the full border-box of this element.
-    layout_absolute_children(node, inner_w + chrome_x, inner_h + chrome_y, &mut children, measurer);
+    // Absolute children use the constrained viewport height, not the content-scroll height.
+    let abs_containing_h = if s.height == Length::Auto && !shrink_wrap {
+        (constraints.available_h - chrome_y).max(0.0)
+    } else {
+        inner_h
+    };
+    layout_absolute_children(node, inner_w, abs_containing_h, &mut children, measurer);
 
     // For shrink-wrap elements, width comes from in-flow children extents only.
     let inner_w = if shrink_wrap {
