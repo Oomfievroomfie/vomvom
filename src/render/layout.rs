@@ -6,7 +6,7 @@
 //   finalize_positions() does a single post-pass to convert everything to
 //   absolute screen coords by recursively adding parent content origins.
 
-use crate::render::style::{Display, FlexDirection, AlignItems, JustifyContent, Length, Position};
+use crate::render::style::{Display, FlexDirection, FlexWrap, AlignItems, JustifyContent, Length, Position};
 use crate::render::tree::{Node, NodeContent};
 
 pub trait TextMeasurer {
@@ -144,7 +144,7 @@ fn layout_element(node: &Node, constraints: Constraints, measurer: &mut dyn Text
     // Absolute children get placeholder slots; layout_absolute_children fills them in.
     let mut children = match s.display {
         Display::Flex | Display::InlineFlex => {
-            let in_flow = layout_flex(node, content_constraints, s.flex_direction, s.align_items, s.justify_content, s.gap, measurer);
+            let in_flow = layout_flex(node, content_constraints, s.flex_direction, s.flex_wrap, s.align_items, s.justify_content, s.gap, measurer);
             // Re-merge: insert placeholder slots for absolute children at their original indices.
             let mut result = Vec::with_capacity(node.children().len());
             let mut in_flow_iter = in_flow.into_iter();
@@ -254,6 +254,7 @@ fn layout_flex(
     node: &Node,
     constraints: Constraints,
     direction: FlexDirection,
+    wrap: FlexWrap,
     align: AlignItems,
     justify: JustifyContent,
     gap: f32,
@@ -271,15 +272,9 @@ fn layout_flex(
     let main_avail = if is_row { constraints.available_w } else { constraints.available_h };
     let cross_avail = if is_row { constraints.available_h } else { constraints.available_w };
 
-    // First pass: measure natural sizes.
-    let mut natural: Vec<f32> = Vec::with_capacity(children.len());
-    let mut grow_sum = 0.0f32;
-    let mut shrink_sum = 0.0f32;
-    let mut fixed_total = 0.0f32;
-
-    for child in &children {
+    // Measure natural (intrinsic) sizes for all children.
+    let natural: Vec<f32> = children.iter().map(|child| {
         let cs = &child.style;
-        // Measure each child's border-box size on the main axis.
         let basis = {
             let explicit_len = match cs.flex_basis {
                 Length::Auto => if is_row { cs.width } else { cs.height },
@@ -287,8 +282,6 @@ fn layout_flex(
             };
             match explicit_len {
                 Length::Auto => {
-                    // No explicit size. Items with flex_grow use basis=0.
-                    // Items with no grow get intrinsic border-box size.
                     if cs.flex_grow > 0.0 {
                         0.0
                     } else {
@@ -297,7 +290,6 @@ fn layout_flex(
                     }
                 }
                 other => {
-                    // Explicit content size — add padding+border to get border-box size.
                     let bw = cs.border.width * 2.0;
                     let (chrome, avail) = if is_row {
                         let p = cs.padding.left.resolve(main_avail) + cs.padding.right.resolve(main_avail);
@@ -315,11 +307,112 @@ fn layout_flex(
         } else {
             cs.margin.top.resolve(constraints.available_h) + cs.margin.bottom.resolve(constraints.available_h)
         };
-        let slot = basis + margin_main;
-        natural.push(slot);
-        fixed_total += slot;
-        grow_sum += cs.flex_grow;
-        shrink_sum += cs.flex_shrink;
+        basis + margin_main
+    }).collect();
+
+    if wrap == FlexWrap::Wrap && is_row {
+        // Break children into rows greedily.
+        let mut rows: Vec<Vec<usize>> = Vec::new();
+        let mut row_indices: Vec<usize> = Vec::new();
+        let mut row_used = 0.0f32;
+
+        for (i, &nat) in natural.iter().enumerate() {
+            let needed = if row_indices.is_empty() { nat } else { nat + gap };
+            if !row_indices.is_empty() && row_used + needed > main_avail + 0.001 {
+                rows.push(row_indices.clone());
+                row_indices.clear();
+                row_used = 0.0;
+            }
+            row_indices.push(i);
+            row_used += if row_indices.len() == 1 { nat } else { nat + gap };
+        }
+        if !row_indices.is_empty() {
+            rows.push(row_indices);
+        }
+
+        // Layout each row independently, then offset by accumulated cross (y) position.
+        let mut result = vec![LayoutBox::leaf(Rect::default(), Rect::default()); children.len()];
+        let mut cross_cursor = 0.0f32;
+
+        for row in &rows {
+            let row_children: Vec<&Node> = row.iter().map(|&i| children[i]).collect();
+            let row_natural: Vec<f32> = row.iter().map(|&i| natural[i]).collect();
+
+            let fixed_total: f32 = row_natural.iter().sum();
+            let gap_total = gap * (row.len() as f32 - 1.0).max(0.0);
+            let free = main_avail - fixed_total - gap_total;
+
+            let mut grow_sum = 0.0f32;
+            let mut shrink_sum = 0.0f32;
+            for child in &row_children {
+                grow_sum += child.style.flex_grow;
+                shrink_sum += child.style.flex_shrink;
+            }
+
+            let mut sizes: Vec<f32> = row_natural.clone();
+            if free > 0.0 && grow_sum > 0.0 {
+                for (j, child) in row_children.iter().enumerate() {
+                    sizes[j] += free * (child.style.flex_grow / grow_sum);
+                }
+            } else if free < 0.0 && shrink_sum > 0.0 {
+                for (j, child) in row_children.iter().enumerate() {
+                    sizes[j] += free * (child.style.flex_shrink / shrink_sum);
+                }
+            }
+
+            let total_size: f32 = sizes.iter().sum::<f32>() + gap_total;
+            let start_offset = match justify {
+                JustifyContent::Start => 0.0,
+                JustifyContent::End => (main_avail - total_size).max(0.0),
+                JustifyContent::Center => ((main_avail - total_size) / 2.0).max(0.0),
+                JustifyContent::SpaceBetween | JustifyContent::SpaceAround => 0.0,
+            };
+            let extra_gap = match justify {
+                JustifyContent::SpaceBetween if row.len() > 1 => {
+                    (main_avail - total_size).max(0.0) / (row.len() as f32 - 1.0)
+                }
+                JustifyContent::SpaceAround => {
+                    (main_avail - total_size).max(0.0) / row.len() as f32
+                }
+                _ => 0.0,
+            };
+            let around_offset = if matches!(justify, JustifyContent::SpaceAround) { extra_gap / 2.0 } else { 0.0 };
+
+            let mut cursor = start_offset + around_offset;
+            let mut row_cross_size = 0.0f32;
+
+            for (j, &orig_i) in row.iter().enumerate() {
+                let child = row_children[j];
+                let cs = &child.style;
+                let main_size = sizes[j].max(0.0);
+                let ml = cs.margin.left.resolve(constraints.available_w);
+                let mr = cs.margin.right.resolve(constraints.available_w);
+                let mut lb = layout(child, Constraints::new((main_size - ml - mr).max(0.0), cross_avail), measurer);
+
+                lb.border_box.x += cursor;
+                lb.content.x += cursor;
+                lb.border_box.y += cross_cursor;
+                lb.content.y += cross_cursor;
+
+                row_cross_size = row_cross_size.max(lb.border_box.h);
+                cursor += main_size + gap + extra_gap;
+                result[orig_i] = lb;
+            }
+
+            cross_cursor += row_cross_size + gap;
+        }
+
+        return result;
+    }
+
+    // Non-wrapping path (original logic).
+    let mut grow_sum = 0.0f32;
+    let mut shrink_sum = 0.0f32;
+    let mut fixed_total = 0.0f32;
+    for (i, child) in children.iter().enumerate() {
+        fixed_total += natural[i];
+        grow_sum += child.style.flex_grow;
+        shrink_sum += child.style.flex_shrink;
     }
 
     let gap_total = gap * (children.len() as f32 - 1.0).max(0.0);
@@ -373,8 +466,6 @@ fn layout_flex(
 
         let mut lb = layout(child, child_constraints, measurer);
 
-        // Position on main axis. border_box already includes margin offset from layout_element,
-        // so we only add the cursor position here.
         if is_row {
             lb.border_box.x += cursor;
             lb.content.x += cursor;
@@ -383,7 +474,6 @@ fn layout_flex(
             lb.content.y += cursor;
         }
 
-        // Cross-axis alignment.
         let cross_size = if is_row { lb.border_box.h } else { lb.border_box.w };
         let cross_offset = match align {
             AlignItems::Start => 0.0,

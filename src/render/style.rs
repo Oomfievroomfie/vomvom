@@ -30,6 +30,12 @@ pub enum FlexDirection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FlexWrap {
+    NoWrap,
+    Wrap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AlignItems {
     Start,
     Center,
@@ -184,6 +190,7 @@ pub struct ComputedStyle {
     pub justify_content: JustifyContent,
     pub flex_grow: f32,
     pub flex_shrink: f32,
+    pub flex_wrap: FlexWrap,
     pub flex_basis: Length,
     pub width: Length,
     pub height: Length,
@@ -221,6 +228,7 @@ impl Default for ComputedStyle {
             justify_content: JustifyContent::Start,
             flex_grow: 0.0,
             flex_shrink: 1.0,
+            flex_wrap: FlexWrap::NoWrap,
             flex_basis: Length::Auto,
             width: Length::Auto,
             height: Length::Auto,
@@ -260,6 +268,7 @@ pub enum StyleDecl {
     JustifyContent(JustifyContent),
     FlexGrow(f32),
     FlexShrink(f32),
+    FlexWrap(FlexWrap),
     FlexBasis(Length),
     Width(Length),
     Height(Length),
@@ -308,6 +317,7 @@ impl StyleDecl {
             StyleDecl::JustifyContent(v) => s.justify_content = *v,
             StyleDecl::FlexGrow(v) => s.flex_grow = *v,
             StyleDecl::FlexShrink(v) => s.flex_shrink = *v,
+            StyleDecl::FlexWrap(v) => s.flex_wrap = *v,
             StyleDecl::FlexBasis(v) => s.flex_basis = *v,
             StyleDecl::Width(v) => s.width = *v,
             StyleDecl::Height(v) => s.height = *v,
@@ -459,6 +469,7 @@ pub fn compute_style(sheet: &Stylesheet, node: &NodeDesc, inherited: Option<&Com
     base.justify_content = defaults.justify_content;
     base.flex_grow = defaults.flex_grow;
     base.flex_shrink = defaults.flex_shrink;
+    base.flex_wrap = defaults.flex_wrap;
     base.flex_basis = defaults.flex_basis;
     base.gap = defaults.gap;
     base.z_index = defaults.z_index;

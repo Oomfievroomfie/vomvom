@@ -8,7 +8,7 @@
 //   Comments: /* ... */
 
 use crate::render::style::{
-    AlignItems, Color, Display, Edges, FlexDirection, JustifyContent, Length, Overflow,
+    AlignItems, Color, Display, Edges, FlexDirection, FlexWrap, JustifyContent, Length, Overflow,
     Position, Selector, StyleDecl, Stylesheet,
 };
 
@@ -234,6 +234,7 @@ fn parse_decl(prop: &str, val: &str) -> Option<StyleDecl> {
         "justify-content" => Some(StyleDecl::JustifyContent(parse_justify_content(val)?)),
         "flex-grow" => Some(StyleDecl::FlexGrow(val.parse().ok()?)),
         "flex-shrink" => Some(StyleDecl::FlexShrink(val.parse().ok()?)),
+        "flex-wrap" => Some(StyleDecl::FlexWrap(parse_flex_wrap(val)?)),
         "flex-basis" => Some(StyleDecl::FlexBasis(parse_length(val)?)),
         "width" => Some(StyleDecl::Width(parse_length(val)?)),
         "height" => Some(StyleDecl::Height(parse_length(val)?)),
@@ -428,6 +429,14 @@ fn parse_justify_content(val: &str) -> Option<JustifyContent> {
         "flex-end" | "end" => Some(JustifyContent::End),
         "space-between" => Some(JustifyContent::SpaceBetween),
         "space-around" => Some(JustifyContent::SpaceAround),
+        _ => None,
+    }
+}
+
+fn parse_flex_wrap(val: &str) -> Option<FlexWrap> {
+    match val {
+        "nowrap" => Some(FlexWrap::NoWrap),
+        "wrap" => Some(FlexWrap::Wrap),
         _ => None,
     }
 }

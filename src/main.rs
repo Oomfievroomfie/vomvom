@@ -71,6 +71,7 @@ struct AppState {
     highlight_cache: std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>,
     last_input: Option<Instant>,
     editor_font_size: f32,
+    cursor_ideal_x: Option<f32>,
 }
 
 impl App {
@@ -175,6 +176,7 @@ impl ApplicationHandler for App {
             highlight_cache,
             last_input: None,
             editor_font_size,
+            cursor_ideal_x: None,
         });
     }
 
@@ -247,17 +249,20 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::ArrowLeft) if ctrl => {
                         let pos = buf.word_start_left(buf.cursor);
                         buf.move_cursor(pos.line, pos.col);
+                        state.cursor_ideal_x = None;
                         buf.break_undo_group();
                     }
                     Key::Named(NamedKey::ArrowLeft) => {
                         let pos = buf.cursor;
                         let (l, c) = if pos.col > 0 { (pos.line, pos.col - 1) } else if pos.line > 0 { (pos.line - 1, buf.line(pos.line - 1).chars().count()) } else { (0, 0) };
                         buf.move_cursor(l, c);
+                        state.cursor_ideal_x = None;
                         buf.break_undo_group();
                     }
                     Key::Named(NamedKey::ArrowRight) if ctrl => {
                         let pos = buf.word_end_right(buf.cursor);
                         buf.move_cursor(pos.line, pos.col);
+                        state.cursor_ideal_x = None;
                         buf.break_undo_group();
                     }
                     Key::Named(NamedKey::ArrowRight) => {
@@ -265,30 +270,54 @@ impl ApplicationHandler for App {
                         let line_len = buf.line(pos.line).chars().count();
                         let (l, c) = if pos.col < line_len { (pos.line, pos.col + 1) } else if pos.line + 1 < buf.line_count() { (pos.line + 1, 0) } else { (pos.line, pos.col) };
                         buf.move_cursor(l, c);
+                        state.cursor_ideal_x = None;
                         buf.break_undo_group();
                     }
                     Key::Named(NamedKey::ArrowUp) => {
                         let pos = buf.cursor;
-                        if pos.line > 0 { buf.move_cursor(pos.line - 1, pos.col); }
+                        let scroll = buf.scroll_line;
+                        let mono_font = state.femtovg_fonts.filter(|_| state.use_femtovg).map(|(_, m)| m);
+                        let line_count = buf.line_count();
+                        // Establish ideal_x from current cursor position if not already set.
+                        if state.cursor_ideal_x.is_none() {
+                            if let Some(x) = compute_cursor_x(&mut state.canvas, &state.last_layout, &state.doc.root, pos.line, pos.col, scroll, mono_font, MONO_BYTES, state.editor_font_size) {
+                                state.cursor_ideal_x = Some(x);
+                            }
+                        }
+                        let ideal_x = state.cursor_ideal_x.unwrap_or(0.0);
+                        let (new_line, new_col) = move_cursor_vertical(&mut state.canvas, &state.last_layout, &state.doc.root, pos.line, pos.col, scroll, line_count, -1, ideal_x, mono_font, MONO_BYTES, state.editor_font_size);
+                        buf.move_cursor(new_line, new_col);
                         buf.break_undo_group();
                     }
                     Key::Named(NamedKey::ArrowDown) => {
                         let pos = buf.cursor;
-                        if pos.line + 1 < buf.line_count() { buf.move_cursor(pos.line + 1, pos.col); }
+                        let scroll = buf.scroll_line;
+                        let mono_font = state.femtovg_fonts.filter(|_| state.use_femtovg).map(|(_, m)| m);
+                        let line_count = buf.line_count();
+                        if state.cursor_ideal_x.is_none() {
+                            if let Some(x) = compute_cursor_x(&mut state.canvas, &state.last_layout, &state.doc.root, pos.line, pos.col, scroll, mono_font, MONO_BYTES, state.editor_font_size) {
+                                state.cursor_ideal_x = Some(x);
+                            }
+                        }
+                        let ideal_x = state.cursor_ideal_x.unwrap_or(0.0);
+                        let (new_line, new_col) = move_cursor_vertical(&mut state.canvas, &state.last_layout, &state.doc.root, pos.line, pos.col, scroll, line_count, 1, ideal_x, mono_font, MONO_BYTES, state.editor_font_size);
+                        buf.move_cursor(new_line, new_col);
                         buf.break_undo_group();
                     }
                     Key::Named(NamedKey::Home) => {
                         let line = buf.cursor.line;
                         buf.move_cursor(line, 0);
+                        state.cursor_ideal_x = None;
                         buf.break_undo_group();
                     }
                     Key::Named(NamedKey::End) => {
                         let line = buf.cursor.line;
                         let len = buf.line(line).chars().count();
                         buf.move_cursor(line, len);
+                        state.cursor_ideal_x = None;
                         buf.break_undo_group();
                     }
-                    Key::Character(s) if !ctrl => { buf.insert(s); state.highlight_dirty = true; }
+                    Key::Character(s) if !ctrl => { buf.insert(s); state.highlight_dirty = true; state.cursor_ideal_x = None; }
                     _ => { dirty = false; }
                 }
                 if dirty {
@@ -355,11 +384,12 @@ impl ApplicationHandler for App {
                         state.needs_redraw = true;
                     } else if let Some((line, col)) = {
                         let mono_font = state.femtovg_fonts.filter(|_| state.use_femtovg).map(|(_, m)| m);
-                        hit_test_editor(&mut state.canvas, lb, &state.session, mx, my, MONO_BYTES, mono_font, state.editor_font_size)
+                        hit_test_editor(&mut state.canvas, lb, &state.doc.root, &state.session, mx, my, MONO_BYTES, mono_font, state.editor_font_size)
                     } {
                         let buf = state.session.active_mut();
                         buf.move_cursor(line, col);
                         buf.break_undo_group();
+                        state.cursor_ideal_x = None;
                         let editor_h = editor_content_height(win_h);
                         scroll_to_cursor(&mut state.session, editor_h, state.editor_font_size);
                         state.needs_redraw = true;
@@ -466,7 +496,7 @@ impl ApplicationHandler for App {
                     let layout_line = buf.cursor.line - scroll;
                     let cursors = vec![(layout_line, buf.cursor.col, line_text.as_str())];
                     let mono_font = state.femtovg_fonts.filter(|_| state.use_femtovg).map(|(_, m)| m);
-                    paint_cursors_with_text(&mut state.canvas, &lb, &cursors, MONO_BYTES, mono_font, state.editor_font_size);
+                    paint_cursors_with_text(&mut state.canvas, &lb, &state.doc.root, &cursors, MONO_BYTES, mono_font, state.editor_font_size);
                 }
 
                 state.canvas.flush();
@@ -943,31 +973,245 @@ fn text_prefix_width(
     }
 }
 
+/// Return the pixel x of the cursor on its current visual row, or None if layout unavailable.
+fn compute_cursor_x(
+    canvas: &mut Canvas<OpenGl>,
+    last_layout: &Option<LayoutBox>,
+    doc_root: &Node,
+    logical_line: usize,
+    col: usize,
+    scroll: usize,
+    mono_font: Option<FontId>,
+    mono_data: &'static [u8],
+    font_size: f32,
+) -> Option<f32> {
+    if logical_line < scroll { return None; }
+    let layout_idx = logical_line - scroll;
+    let editor_lb = last_layout.as_ref()?.children.get(2)?;
+    let editor_node = doc_root.children().get(2)?;
+    let line_lb = editor_lb.children.get(layout_idx)?;
+    let line_node = editor_node.children().get(layout_idx)?;
+    let (_, x) = cursor_visual_row_and_x(canvas, line_lb, line_node, col, mono_font, mono_data, font_size);
+    Some(x)
+}
+
+/// Move cursor one visual row up (dir=-1) or down (dir=1), returning new (logical_line, col).
+/// Wraps across logical lines, landing at the closest column to ideal_x.
+fn move_cursor_vertical(
+    canvas: &mut Canvas<OpenGl>,
+    last_layout: &Option<LayoutBox>,
+    doc_root: &Node,
+    logical_line: usize,
+    col: usize,
+    scroll: usize,
+    line_count: usize,
+    dir: i32, // -1 or 1
+    ideal_x: f32,
+    mono_font: Option<FontId>,
+    mono_data: &'static [u8],
+    font_size: f32,
+) -> (usize, usize) {
+    // Try within the same logical line.
+    if logical_line >= scroll {
+        let layout_idx = logical_line - scroll;
+        if let (Some(editor_lb), Some(editor_node)) = (
+            last_layout.as_ref().and_then(|lb| lb.children.get(2)),
+            doc_root.children().get(2),
+        ) {
+            if let (Some(line_lb), Some(line_node)) = (editor_lb.children.get(layout_idx), editor_node.children().get(layout_idx)) {
+                let span_count = line_node.children().len();
+                let rows = visual_rows_for_line(line_lb, span_count);
+                let (cur_vrow, _) = cursor_visual_row_and_x(canvas, line_lb, line_node, col, mono_font, mono_data, font_size);
+                let target_vrow = cur_vrow as i32 + dir;
+                if target_vrow >= 0 && (target_vrow as usize) < rows.len() {
+                    let row = &rows[target_vrow as usize];
+                    let base = char_base_for_row(line_node, row);
+                    let new_col = col_at_x_on_row(canvas, line_lb, line_node, row, base, ideal_x, mono_font, mono_data, font_size);
+                    return (logical_line, new_col);
+                }
+            }
+        }
+    }
+
+    // Cross to adjacent logical line.
+    let target_line = logical_line as i32 + dir;
+    if target_line < 0 || target_line as usize >= line_count {
+        return (logical_line, col);
+    }
+    let target_logical = target_line as usize;
+    if target_logical < scroll {
+        // Target line not in layout; just preserve col.
+        return (target_logical, col);
+    }
+    let target_layout_idx = target_logical - scroll;
+    if let (Some(editor_lb), Some(editor_node)) = (
+        last_layout.as_ref().and_then(|lb| lb.children.get(2)),
+        doc_root.children().get(2),
+    ) {
+        if let (Some(line_lb), Some(line_node)) = (editor_lb.children.get(target_layout_idx), editor_node.children().get(target_layout_idx)) {
+            let span_count = line_node.children().len();
+            let rows = visual_rows_for_line(line_lb, span_count);
+            // Going up → last visual row; going down → first visual row.
+            let row = if dir < 0 {
+                rows.last().map(|r| r.as_slice()).unwrap_or(&[])
+            } else {
+                rows.first().map(|r| r.as_slice()).unwrap_or(&[])
+            };
+            let base = char_base_for_row(line_node, row);
+            let new_col = col_at_x_on_row(canvas, line_lb, line_node, row, base, ideal_x, mono_font, mono_data, font_size);
+            return (target_logical, new_col);
+        }
+    }
+    (target_logical, col)
+}
+
+/// Returns visual rows for a line as groups of span indices, sorted top-to-bottom.
+/// Each group contains the span indices that share the same border_box.y (within 1px).
+fn visual_rows_for_line(line_lb: &LayoutBox, span_count: usize) -> Vec<Vec<usize>> {
+    let mut rows: Vec<(f32, Vec<usize>)> = Vec::new();
+    for si in 0..span_count {
+        let Some(span_lb) = line_lb.children.get(si) else { continue };
+        let y = span_lb.border_box.y;
+        if let Some(row) = rows.iter_mut().find(|(ry, _)| (ry - y).abs() < 1.0) {
+            row.1.push(si);
+        } else {
+            rows.push((y, vec![si]));
+        }
+    }
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    rows.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Given a line node + lb + cursor col, return (visual_row_idx, x_pixel) for the cursor.
+fn cursor_visual_row_and_x(
+    canvas: &mut Canvas<OpenGl>,
+    line_lb: &LayoutBox,
+    line_node: &Node,
+    col: usize,
+    mono_font: Option<FontId>,
+    mono_data: &'static [u8],
+    font_size: f32,
+) -> (usize, f32) {
+    let span_count = line_node.children().len();
+    let rows = visual_rows_for_line(line_lb, span_count);
+
+    let mut char_offset = 0usize;
+    for si in 0..span_count {
+        let span_text = span_text_of(line_node, si);
+        let span_chars = span_text.chars().count();
+        if col <= char_offset + span_chars || si + 1 == span_count {
+            // Find which visual row this span is in.
+            let vrow = rows.iter().position(|r| r.contains(&si)).unwrap_or(0);
+            let intra = col.saturating_sub(char_offset).min(span_chars);
+            let prefix: String = span_text.chars().take(intra).collect();
+            let x_off = text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
+            let span_x = line_lb.children.get(si).map_or(0.0, |s| s.border_box.x);
+            return (vrow, span_x + x_off);
+        }
+        char_offset += span_chars;
+    }
+    (0, line_lb.content.x)
+}
+
+/// Return col closest to target_x on a given visual row of a line.
+fn col_at_x_on_row(
+    canvas: &mut Canvas<OpenGl>,
+    line_lb: &LayoutBox,
+    line_node: &Node,
+    row_spans: &[usize],
+    char_base_of_row: usize,
+    target_x: f32,
+    mono_font: Option<FontId>,
+    mono_data: &'static [u8],
+    font_size: f32,
+) -> usize {
+    let mut best_col = char_base_of_row;
+    let mut best_dist = f32::INFINITY;
+    let mut char_offset = char_base_of_row;
+
+    for &si in row_spans {
+        let span_text = span_text_of(line_node, si);
+        let chars: Vec<char> = span_text.chars().collect();
+        let span_x = line_lb.children.get(si).map_or(0.0, |s| s.border_box.x);
+        for intra in 0..=chars.len() {
+            let prefix: String = chars[..intra].iter().collect();
+            let x = span_x + text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
+            let dist = (x - target_x).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best_col = char_offset + intra;
+            }
+        }
+        char_offset += chars.len();
+    }
+    best_col
+}
+
+/// Char offset of the first character on a given visual row.
+fn char_base_for_row(line_node: &Node, row_spans: &[usize]) -> usize {
+    let first_si = match row_spans.first() { Some(&s) => s, None => return 0 };
+    let mut offset = 0usize;
+    for si in 0..first_si {
+        offset += span_text_of(line_node, si).chars().count();
+    }
+    offset
+}
+
+fn span_text_of<'a>(line_node: &'a Node, si: usize) -> &'a str {
+    line_node.children().get(si)
+        .and_then(|span| span.children().first())
+        .and_then(|n| if let render::tree::NodeContent::Text(t) = &n.content { Some(t.as_str()) } else { None })
+        .unwrap_or("")
+}
+
 /// Paint cursor bars at the given (line, col, text) positions over the editor area.
 fn paint_cursors_with_text(
     canvas: &mut Canvas<OpenGl>,
     lb: &LayoutBox,
+    doc_root: &Node,
     cursors: &[(usize, usize, &str)], // (line_idx, col, line_text)
     mono_data: &'static [u8],
     mono_font: Option<FontId>,
     font_size: f32,
 ) {
     let Some(editor_lb) = lb.children.get(2) else { return };
+    // editor node is child index 2 of root
+    let Some(editor_node) = doc_root.children().get(2) else { return };
 
     let cursor_color = femtovg::Color::rgbaf(0.9, 0.9, 1.0, 0.85);
+    let line_h = font_size * 1.4;
 
-    for &(line_idx, col, line_text) in cursors {
+    for &(line_idx, col, _line_text) in cursors {
         let Some(line_lb) = editor_lb.children.get(line_idx) else { continue };
-        let line_h = line_lb.border_box.h;
-        let line_top = line_lb.border_box.y;
+        let Some(line_node) = editor_node.children().get(line_idx) else { continue };
 
-        let prefix: String = line_text.chars().take(col).collect();
-        let x_off = text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
-        println!("cursor at {x_off}");
-        let cursor_x = line_lb.content.x + x_off;
+        // Walk spans to find which span contains col, and x offset within it.
+        let mut char_offset = 0usize;
+        let mut cursor_x = line_lb.content.x;
+        let mut cursor_y = line_lb.border_box.y;
+
+        let spans = line_node.children();
+        for (si, span_node) in spans.iter().enumerate() {
+            let span_text = span_node.children().first()
+                .and_then(|n| if let render::tree::NodeContent::Text(t) = &n.content { Some(t.as_str()) } else { None })
+                .unwrap_or("");
+            let span_chars = span_text.chars().count();
+            let Some(span_lb) = line_lb.children.get(si) else { break };
+
+            if col <= char_offset + span_chars || si + 1 == spans.len() {
+                // Cursor is inside this span (or we're past all spans).
+                let intra = col.saturating_sub(char_offset).min(span_chars);
+                let prefix: String = span_text.chars().take(intra).collect();
+                let x_off = text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
+                cursor_x = span_lb.border_box.x + x_off;
+                cursor_y = span_lb.border_box.y;
+                break;
+            }
+            char_offset += span_chars;
+        }
 
         let mut path = Path::new();
-        path.rect(cursor_x, line_top, 2.0, line_h);
+        path.rect(cursor_x, cursor_y, 2.0, line_h);
         let paint = Paint::color(cursor_color);
         canvas.fill_path(&path, &paint);
     }
@@ -1001,6 +1245,7 @@ fn scrollbar_y_to_scroll(track_lb: &LayoutBox, session: &Session, my: f32, windo
 fn hit_test_editor(
     canvas: &mut Canvas<OpenGl>,
     lb: &LayoutBox,
+    doc_root: &Node,
     session: &Session,
     mx: f32,
     my: f32,
@@ -1010,37 +1255,87 @@ fn hit_test_editor(
 ) -> Option<(usize, usize)> {
     let editor_lb = lb.children.get(2)?;
     if !editor_lb.border_box.contains(mx, my) { return None; }
+    let editor_node = doc_root.children().get(2)?;
 
     let buf = session.active();
     let scroll = buf.scroll_line;
+    let line_h = font_size * 1.4;
 
     // Last child is the scrollbar track (absolutely positioned), not a text line.
     let line_count = editor_lb.children.len().saturating_sub(1);
     if line_count == 0 { return Some((0, 0)); }
 
-    let mut best_layout_line = 0;
-    for (i, line_lb) in editor_lb.children[..line_count].iter().enumerate() {
-        if my >= line_lb.border_box.y {
-            best_layout_line = i;
+    // Find the best visual row by scanning all spans across all lines.
+    // A span's visual row top is span_lb.border_box.y. We want the row whose
+    // top is <= my and is closest (i.e. largest y <= my).
+    let mut best_row_y = f32::NEG_INFINITY;
+    for line_lb in &editor_lb.children[..line_count] {
+        for span_lb in &line_lb.children {
+            let sy = span_lb.border_box.y;
+            if sy <= my && sy > best_row_y {
+                best_row_y = sy;
+            }
+        }
+    }
+    // If nothing found above the click, use the topmost row.
+    if best_row_y == f32::NEG_INFINITY {
+        best_row_y = editor_lb.children[..line_count].iter()
+            .flat_map(|l| l.children.iter())
+            .map(|s| s.border_box.y)
+            .fold(f32::INFINITY, f32::min);
+    }
+
+    // Among all spans on that visual row, find the one closest in x to the click.
+    let mut best_line_idx = 0usize;
+    let mut best_span_idx = 0usize;
+    let mut best_x_dist = f32::INFINITY;
+
+    for (li, line_lb) in editor_lb.children[..line_count].iter().enumerate() {
+        for (si, span_lb) in line_lb.children.iter().enumerate() {
+            if (span_lb.border_box.y - best_row_y).abs() > line_h * 0.5 { continue; }
+            let span_center_x = span_lb.border_box.x + span_lb.border_box.w / 2.0;
+            let dist = (span_center_x - mx).abs();
+            if dist < best_x_dist {
+                best_x_dist = dist;
+                best_line_idx = li;
+                best_span_idx = si;
+            }
         }
     }
 
-    let buf_line = best_layout_line + scroll;
-    let line_text = buf.line(buf_line);
-    let line_lb = &editor_lb.children[best_layout_line];
-    let local_x = mx - line_lb.content.x;
+    let buf_line = best_line_idx + scroll;
+    let line_node = editor_node.children().get(best_line_idx)?;
 
-    let chars: Vec<char> = line_text.chars().collect();
-    let mut best_col = 0;
+    // Accumulate char offset up to best_span_idx.
+    let mut char_base = 0usize;
+    for si in 0..best_span_idx {
+        if let Some(span) = line_node.children().get(si) {
+            if let Some(text_node) = span.children().first() {
+                if let render::tree::NodeContent::Text(t) = &text_node.content {
+                    char_base += t.chars().count();
+                }
+            }
+        }
+    }
+
+    // Now find col within this span.
+    let span_node = line_node.children().get(best_span_idx)?;
+    let span_text = span_node.children().first()
+        .and_then(|n| if let render::tree::NodeContent::Text(t) = &n.content { Some(t.as_str()) } else { None })
+        .unwrap_or("");
+    let span_lb = &editor_lb.children[best_line_idx].children[best_span_idx];
+    let local_x = mx - span_lb.border_box.x;
+
+    let chars: Vec<char> = span_text.chars().collect();
+    let mut best_col = char_base;
     let mut best_dist = f32::INFINITY;
-
-    for col in 0..=chars.len() {
-        let prefix: String = chars[..col].iter().collect();
+    for intra in 0..=chars.len() {
+        let prefix: String = chars[..intra].iter().collect();
         let x = text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
         let dist = (x - local_x).abs();
         if dist < best_dist {
             best_dist = dist;
-            best_col = col;
+            best_col = char_base + intra;
         }
     }
 

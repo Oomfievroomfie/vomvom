@@ -95,6 +95,7 @@ root {
 .line {
     display: flex;
     flex-direction: row;
+    flex-wrap: wrap;
     line-height: 1.4;
     font-size: 12px;
 }
