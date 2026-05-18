@@ -66,6 +66,7 @@ struct AppState {
     ime_preedit: String,
     debug_boxes: bool,
     scrollbar_drag: bool,
+    highlight_cache: std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>,
 }
 
 impl App {
@@ -141,7 +142,9 @@ impl ApplicationHandler for App {
             session.set_active(idx);
         }
 
-        let doc = Document::new(build_initial_document(&session));
+        let mut highlight_cache = std::collections::HashMap::new();
+        rebuild_highlight_cache(&mut highlight_cache, &session);
+        let doc = Document::new(build_initial_document(&session, &highlight_cache));
 
         self.state = Some(AppState {
             window,
@@ -162,6 +165,7 @@ impl ApplicationHandler for App {
             ime_preedit: String::new(),
             debug_boxes: false,
             scrollbar_drag: false,
+            highlight_cache,
         });
     }
 
@@ -186,7 +190,8 @@ impl ApplicationHandler for App {
                 match &key {
                     Key::Character(s) if ctrl && (s == "o" || s == "O") => {
                         open_file_dialog(&mut state.session);
-                        sync_doc_to_session(&mut state.doc, &state.session);
+                        rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
+                        sync_doc_to_session(&mut state.doc, &state.session, &state.highlight_cache);
                         state.needs_redraw = true;
                         return;
                     }
@@ -269,7 +274,8 @@ impl ApplicationHandler for App {
                 if dirty {
                     let editor_h = editor_content_height(state.window.inner_size().height as f32);
                     scroll_to_cursor(&mut state.session, editor_h);
-                    update_editor(&mut state.doc, &state.session);
+                    rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
+                    update_editor(&mut state.doc, &state.session, &state.highlight_cache);
                     update_statusbar(&mut state.doc, &state.session);
                     state.needs_redraw = true;
                 }
@@ -287,7 +293,7 @@ impl ApplicationHandler for App {
                             let scroll = scrollbar_y_to_scroll(&track_lb, &state.session, my, win_h);
                             state.session.active_mut().scroll_line = scroll;
                             state.session.active_mut().dirty = true;
-                            update_editor(&mut state.doc, &state.session);
+                            update_editor(&mut state.doc, &state.session, &state.highlight_cache);
                             state.needs_redraw = true;
                         }
                     }
@@ -304,7 +310,8 @@ impl ApplicationHandler for App {
                         if let Some(action) = hit_test_menu_item(&state.doc.root, lb, mx, my) {
                             close_all_menus(&mut state.doc);
                             execute_menu_action(&action, &mut state.session);
-                            sync_doc_to_session(&mut state.doc, &state.session);
+                            rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
+                            sync_doc_to_session(&mut state.doc, &state.session, &state.highlight_cache);
                             state.needs_redraw = true;
                             return;
                         }
@@ -321,7 +328,8 @@ impl ApplicationHandler for App {
                     // Tab click?
                     if let Some(idx) = hit_test_tab(&state.doc.root, lb, mx, my) {
                         state.session.set_active(idx);
-                        sync_doc_to_session(&mut state.doc, &state.session);
+                        rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
+                        sync_doc_to_session(&mut state.doc, &state.session, &state.highlight_cache);
                         state.needs_redraw = true;
                         return;
                     }
@@ -333,7 +341,7 @@ impl ApplicationHandler for App {
                         state.session.active_mut().scroll_line = scroll;
                         state.session.active_mut().dirty = true;
                         state.scrollbar_drag = true;
-                        update_editor(&mut state.doc, &state.session);
+                        update_editor(&mut state.doc, &state.session, &state.highlight_cache);
                         state.needs_redraw = true;
                     // Editor click — place cursor.
                     } else if let Some((line, col)) = hit_test_editor(lb, &state.session, mx, my, MONO_BYTES) {
@@ -341,7 +349,7 @@ impl ApplicationHandler for App {
                         buf.move_cursor(line, col);
                         buf.break_undo_group();
                         scroll_to_cursor(&mut state.session, editor_content_height(win_h));
-                        update_editor(&mut state.doc, &state.session);
+                        update_editor(&mut state.doc, &state.session, &state.highlight_cache);
                         update_statusbar(&mut state.doc, &state.session);
                         state.needs_redraw = true;
                     }
@@ -358,7 +366,7 @@ impl ApplicationHandler for App {
                 buf.scroll_line = (buf.scroll_line as f32 + lines).round()
                     .clamp(0.0, max_scroll as f32) as usize;
                 buf.dirty = true;
-                update_editor(&mut state.doc, &state.session);
+                update_editor(&mut state.doc, &state.session, &state.highlight_cache);
                 state.needs_redraw = true;
             }
             WindowEvent::Ime(ime_event) => {
@@ -367,7 +375,8 @@ impl ApplicationHandler for App {
                     Ime::Commit(text) => {
                         state.ime_preedit.clear();
                         state.session.active_mut().insert(&text);
-                        update_editor(&mut state.doc, &state.session);
+                        rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
+                        update_editor(&mut state.doc, &state.session, &state.highlight_cache);
                         update_statusbar(&mut state.doc, &state.session);
                         state.needs_redraw = true;
                     }
@@ -467,7 +476,7 @@ fn build_stylesheet() -> Stylesheet {
 
 // Build the initial retained document. Called once; subsequent updates use
 // the targeted mutation functions below.
-fn build_initial_document(session: &Session) -> Node {
+fn build_initial_document(session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>) -> Node {
     let menus = [("File", "file"), ("Edit", "edit")];
     let mut toolbar = Node::element("div").with_class("toolbar").with_id("toolbar");
     for (label, id) in &menus {
@@ -499,7 +508,7 @@ fn build_initial_document(session: &Session) -> Node {
         .with_child(statusbar);
 
     // Populate dynamic content.
-    update_editor_node(&mut root, session);
+    update_editor_node(&mut root, session, cache);
     update_statusbar_node(&mut root, session);
     root
 }
@@ -573,25 +582,44 @@ fn scroll_to_cursor(session: &mut Session, editor_h: f32) {
 
 // --- Targeted document mutation functions ---
 
-fn update_editor_node(root: &mut Node, session: &Session) {
+fn rebuild_highlight_cache(cache: &mut std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>, session: &Session) {
+    let buf = session.active();
+    let lang = highlight::lang_from_path(buf.path.as_deref());
+    let lines: Vec<Vec<(String, &'static str)>> = (0..buf.line_count())
+        .map(|i| {
+            let text = buf.line(i);
+            if text.is_empty() {
+                vec![(" ".to_string(), "")]
+            } else {
+                highlight::tokenize_line(&text, lang)
+                    .into_iter()
+                    .map(|(s, c)| (s.to_string(), c))
+                    .collect()
+            }
+        })
+        .collect();
+    cache.insert(buf.id, lines);
+}
+
+fn update_editor_node(root: &mut Node, session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>) {
     let buf = session.active();
     let cursor = buf.cursor;
     let scroll = buf.scroll_line;
-    let lang = highlight::lang_from_path(buf.path.as_deref());
+    let empty_cache: Vec<Vec<(String, &'static str)>> = vec![];
+    let lines = cache.get(&buf.id).unwrap_or(&empty_cache);
     let Some(editor) = root.get_element_by_id("editor") else { return };
     editor.clear_children();
     for i in scroll..buf.line_count() {
-        let text = buf.line(i);
         let mut line_node = Node::element("div").with_class("line");
         if i == cursor.line { line_node = line_node.with_class("cursor-line"); }
-        if text.is_empty() {
+        let tokens = lines.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
+        if tokens.is_empty() {
             line_node = line_node.with_child(Node::text(" "));
         } else {
-            let tokens = highlight::tokenize_line(&text, lang);
             for (tok_text, tok_class) in tokens {
                 let mut span = Node::element("span");
-                if !tok_class.is_empty() { span = span.with_class(tok_class); }
-                span = span.with_child(Node::text(tok_text.to_string()));
+                if !tok_class.is_empty() { span = span.with_class(*tok_class); }
+                span = span.with_child(Node::text(tok_text.clone()));
                 line_node = line_node.with_child(span);
             }
         }
@@ -622,8 +650,8 @@ fn update_tab_bar_node(root: &mut Node, session: &Session) {
 }
 
 // Public wrappers used by event handlers.
-fn update_editor(doc: &mut Document, session: &Session) {
-    update_editor_node(&mut doc.root, session);
+fn update_editor(doc: &mut Document, session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>) {
+    update_editor_node(&mut doc.root, session, cache);
     doc.mark_dirty();
 }
 
@@ -632,9 +660,9 @@ fn update_statusbar(doc: &mut Document, session: &Session) {
     doc.mark_dirty();
 }
 
-fn sync_doc_to_session(doc: &mut Document, session: &Session) {
+fn sync_doc_to_session(doc: &mut Document, session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>) {
     update_tab_bar_node(&mut doc.root, session);
-    update_editor_node(&mut doc.root, session);
+    update_editor_node(&mut doc.root, session, cache);
     update_statusbar_node(&mut doc.root, session);
     doc.mark_dirty();
 }
@@ -682,7 +710,9 @@ pub fn build_demo_scene() -> (Node, Stylesheet) {
     let mut session = Session::open(":memory:").expect("in-memory session");
     session.active_mut().path = Some("demo.rs".into());
     session.active_mut().insert("// vomvom — custom rendering engine\n\nmod render;\n\nfn main() {\n    // build scene, run event loop\n    println!(\"hello world\");\n}");
-    let mut doc = Document::new(build_initial_document(&session));
+    let mut cache = std::collections::HashMap::new();
+    rebuild_highlight_cache(&mut cache, &session);
+    let mut doc = Document::new(build_initial_document(&session, &cache));
     open_menu(&mut doc, "file");
     (doc.root, sheet)
 }
@@ -960,7 +990,9 @@ mod perf_tests {
             session.active_mut().insert(line);
             session.active_mut().insert("\n");
         }
-        let mut doc = Document::new(build_initial_document(&session));
+        let mut cache = std::collections::HashMap::new();
+        rebuild_highlight_cache(&mut cache, &session);
+        let mut doc = Document::new(build_initial_document(&session, &cache));
         let iters = 20u32;
         time_iters("apply_styles + layout (full frame × 20)", iters, || {
             apply_styles(&mut doc.root, &sheet, &[], None);
