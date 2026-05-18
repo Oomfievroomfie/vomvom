@@ -545,10 +545,11 @@ const SCROLLBAR_MIN_THUMB_PX: f32 = 32.0;
 /// Returns (thumb_top_px, thumb_h_px) relative to track top, or None if no scrollbar needed.
 /// thumb_h_px accounts for the same minimum as the CSS min-height so top is always correct.
 fn scrollbar_thumb_geometry(total: usize, scroll: usize, visible: usize, track_h: f32) -> Option<(f32, f32)> {
-    if total <= visible { return None; }
-    let thumb_h = (visible as f32 / total as f32 * track_h).max(SCROLLBAR_MIN_THUMB_PX.min(track_h));
+    if total <= 1 { return None; }
+    let virtual_total = (total - 1 + visible) as f32;
+    let thumb_h = (visible as f32 / virtual_total * track_h).max(SCROLLBAR_MIN_THUMB_PX.min(track_h));
     let travel = track_h - thumb_h;
-    let max_scroll = (total - visible) as f32;
+    let max_scroll = (total - 1) as f32;
     let top = if max_scroll > 0.0 { scroll as f32 / max_scroll * travel } else { 0.0 };
     Some((top, thumb_h))
 }
@@ -886,7 +887,7 @@ fn scrollbar_y_to_scroll(track_lb: &LayoutBox, session: &Session, my: f32, windo
     let total = buf.line_count();
     let visible = visible_lines(editor_content_height(window_h));
     let track_h = track_lb.border_box.h;
-    let max_scroll = (total.saturating_sub(visible)) as f32;
+    let max_scroll = total.saturating_sub(1) as f32;
     if max_scroll <= 0.0 { return 0; }
     let (_, thumb_h) = scrollbar_thumb_geometry(total, buf.scroll_line, visible, track_h)
         .unwrap_or((0.0, 0.0));
