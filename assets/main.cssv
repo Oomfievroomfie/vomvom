@@ -186,3 +186,15 @@ root {
 .status-deleted {
     color: rgba(210, 60, 60, 1.0);
 }
+
+.tab.active.status-modified {
+    color: rgba(210, 210, 210, 1.0);
+}
+
+.tab.active.status-diverged {
+    color: rgba(255, 175, 80, 1.0);
+}
+
+.tab.active.status-deleted {
+    color: rgba(255, 90, 90, 1.0);
+}
