@@ -138,7 +138,8 @@ impl ApplicationHandler for App {
         let mut canvas = Canvas::new(renderer).expect("failed to create canvas");
         canvas.set_size(size.width, size.height, window.scale_factor() as f32);
 
-        let sheet = build_stylesheet(11.5);
+        let editor_font_size = 12.0_f32;
+        let sheet = build_stylesheet(editor_font_size);
 
         let mut session = Session::open(&self.db_path).expect("failed to open session db");
         for path in &self.initial_files {
@@ -173,7 +174,7 @@ impl ApplicationHandler for App {
             scrollbar_drag: false,
             highlight_cache,
             last_input: None,
-            editor_font_size: 12.0,
+            editor_font_size,
         });
     }
 
