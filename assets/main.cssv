@@ -78,13 +78,14 @@ root {
     position: absolute;
     top: 0;
     left: 0;
-    display: flex;
-    flex-direction: column;
+    display: block;
     background-color: rgba(33, 33, 41, 1.0);
     color: rgba(120, 120, 140, 1.0);
     font-family: monospace;
     font-size: 12px;
-    padding: 16px 8px 16px 16px;
+    padding: 16px 8px 0 16px;
+    overflow-y: hidden;
+    height: 100%;
 }
 
 .line-number {
