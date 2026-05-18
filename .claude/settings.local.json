@@ -6,7 +6,8 @@
       "Bash(cargo test *)",
       "Bash(cargo run *)",
       "Bash(cargo add *)",
-      "Bash(cargo fetch *)"
+      "Bash(cargo fetch *)",
+      "Bash(./target/release/vomvom.exe --screenshot)"
     ]
   }
 }

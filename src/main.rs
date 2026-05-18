@@ -38,7 +38,7 @@ static DROPDOWN_FILE: &str = include_str!("../assets/dropdown_file.htmv");
 static DROPDOWN_EDIT: &str = include_str!("../assets/dropdown_edit.htmv");
 
 static SANS_BYTES: &[u8] = include_bytes!("../OpenSans-Medium.ttf");
-static MONO_BYTES: &[u8] = include_bytes!("../FiraMono-Medium.ttf");
+static MONO_BYTES: &[u8] = include_bytes!("../UbuntuSansMono-Medium.ttf");
 
 struct App {
     state: Option<AppState>,
