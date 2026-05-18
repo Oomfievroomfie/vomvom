@@ -1,6 +1,6 @@
 // Paint pass — walks LayoutBox tree and issues femtovg draw calls.
 
-use femtovg::{Canvas, renderer::OpenGl, Paint, Path, ImageFlags, PixelFormat};
+use femtovg::{Canvas, renderer::OpenGl, Paint, Path, FontId};
 use crate::render::style::{Color, Display, Overflow};
 use crate::render::tree::{Node, NodeContent};
 use crate::render::layout::{LayoutBox, Rect};
@@ -12,6 +12,8 @@ pub struct PaintContext<'a> {
     pub sans_data: &'static [u8],
     pub mono_data: &'static [u8],
     pub hint: bool,
+    pub use_femtovg: bool,
+    pub femtovg_fonts: Option<(FontId, FontId)>, // (sans, mono)
 }
 
 impl<'a> PaintContext<'a> {
@@ -19,8 +21,27 @@ impl<'a> PaintContext<'a> {
         if family == "monospace" { (self.mono_data, 1) } else { (self.sans_data, 0) }
     }
 
+    fn font_id_for(&self, family: &str) -> Option<FontId> {
+        let (sans, mono) = self.femtovg_fonts?;
+        if family == "monospace" { Some(mono) } else { Some(sans) }
+    }
+
+    fn draw_text_femtovg(&mut self, x: f32, y: f32, text: &str, color: Color, font_size: f32, family: &str) {
+        let Some(font_id) = self.font_id_for(family) else { return };
+        let tint = color.to_femtovg();
+        let mut paint = Paint::color(tint);
+        paint.set_font(&[font_id]);
+        paint.set_font_size(font_size);
+        // femtovg fill_text baseline is the text baseline; y here is already baseline position
+        let _ = self.canvas.fill_text(x, y, text, &paint);
+    }
+
     fn draw_text(&mut self, x: f32, y: f32, text: &str, color: Color, font_size: f32, family: &str) {
         if text.is_empty() { return; }
+        if self.use_femtovg {
+            self.draw_text_femtovg(x, y, text, color, font_size, family);
+            return;
+        }
         let (font_data, font_index) = self.font_data_for(family);
 
         self.glyph_cache.ensure_atlas(self.canvas);

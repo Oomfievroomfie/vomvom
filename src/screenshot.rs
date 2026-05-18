@@ -98,6 +98,8 @@ pub fn save_screenshot(path: &Path, width: u32, height: u32) {
         sans_data: SANS_BYTES,
         mono_data: MONO_BYTES,
         hint: true,
+        use_femtovg: false,
+        femtovg_fonts: None,
     };
     paint_tree(&mut ctx, &scene, &lb);
     ctx.canvas.flush();

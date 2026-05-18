@@ -5,7 +5,7 @@ mod session;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use femtovg::{renderer::OpenGl, Canvas};
+use femtovg::{renderer::OpenGl, Canvas, FontId};
 use glutin::{
     config::ConfigTemplateBuilder,
     context::{ContextApi, ContextAttributesBuilder, PossiblyCurrentContext},
@@ -46,6 +46,8 @@ struct AppState {
     gl_context: PossiblyCurrentContext,
     glyph_cache: GlyphCache,
     hint: bool,
+    use_femtovg: bool,
+    femtovg_fonts: Option<(FontId, FontId)>, // (sans, mono)
     scene: Node,
     sheet: Stylesheet,
 }
@@ -123,6 +125,8 @@ impl ApplicationHandler for App {
             gl_context,
             glyph_cache: GlyphCache::new(),
             hint: true,
+            use_femtovg: false,
+            femtovg_fonts: None,
             scene,
             sheet,
         });
@@ -133,6 +137,25 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::KeyboardInput { event, .. } => {
+                use winit::keyboard::Key;
+                if event.state == winit::event::ElementState::Pressed {
+                    match event.logical_key {
+                        Key::Character(ref s) if s == "f" || s == "F" => {
+                            state.use_femtovg = !state.use_femtovg;
+                            eprintln!("use_femtovg = {}", state.use_femtovg);
+                            state.window.request_redraw();
+                        }
+                        Key::Character(ref s) if s == "h" || s == "H" => {
+                            state.hint = !state.hint;
+                            state.glyph_cache = GlyphCache::new(); // flush cache on hint change
+                            eprintln!("hint = {}", state.hint);
+                            state.window.request_redraw();
+                        }
+                        _ => {}
+                    }
+                }
+            }
             WindowEvent::RedrawRequested => {
                 let size = state.window.inner_size();
                 let w = size.width as f32;
@@ -151,12 +174,21 @@ impl ApplicationHandler for App {
                 let mut lb = layout(&state.scene, Constraints::new(w, h), &mut measurer);
                 finalize_positions(&mut lb);
 
+                // Lazy-load femtovg fonts (needed for the femtovg debug path).
+                if state.femtovg_fonts.is_none() {
+                    let sans_id = state.canvas.add_font_mem(SANS_BYTES).expect("load sans");
+                    let mono_id = state.canvas.add_font_mem(MONO_BYTES).expect("load mono");
+                    state.femtovg_fonts = Some((sans_id, mono_id));
+                }
+
                 let mut ctx = PaintContext {
                     canvas: &mut state.canvas,
                     glyph_cache: &mut state.glyph_cache,
                     sans_data: SANS_BYTES,
                     mono_data: MONO_BYTES,
                     hint: state.hint,
+                    use_femtovg: state.use_femtovg,
+                    femtovg_fonts: state.femtovg_fonts,
                 };
                 paint_tree(&mut ctx, &state.scene, &lb);
 
