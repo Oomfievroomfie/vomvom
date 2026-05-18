@@ -18,7 +18,7 @@ use raw_window_handle::HasWindowHandle;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::WindowEvent,
+    event::{ElementState, Modifiers, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     window::{Window, WindowId},
 };
@@ -27,16 +27,19 @@ use render::layout::{layout, finalize_positions, Constraints};
 use render::paint::{PaintContext, paint_tree};
 use render::style::{
     AlignItems, Color, Display, Edges, FlexDirection, JustifyContent, Length, Selector,
-    Stylesheet, StyleDecl,
+    Stylesheet, StyleDecl, Overflow,
 };
 use render::tree::{Node, apply_styles};
 use render::glyph_cache::GlyphCache;
+use session::Session;
 
 static SANS_BYTES: &[u8] = include_bytes!("../OpenSans-Medium.ttf");
 static MONO_BYTES: &[u8] = include_bytes!("../FiraMono-Regular.ttf");
 
 struct App {
     state: Option<AppState>,
+    db_path: String,
+    initial_files: Vec<String>,
 }
 
 struct AppState {
@@ -47,14 +50,15 @@ struct AppState {
     glyph_cache: GlyphCache,
     hint: bool,
     use_femtovg: bool,
-    femtovg_fonts: Option<(FontId, FontId)>, // (sans, mono)
-    scene: Node,
+    femtovg_fonts: Option<(FontId, FontId)>,
     sheet: Stylesheet,
+    session: Session,
+    modifiers: Modifiers,
 }
 
 impl App {
-    fn new() -> Self {
-        App { state: None }
+    fn new(db_path: String, initial_files: Vec<String>) -> Self {
+        App { state: None, db_path, initial_files }
     }
 }
 
@@ -116,7 +120,13 @@ impl ApplicationHandler for App {
         let mut canvas = Canvas::new(renderer).expect("failed to create canvas");
         canvas.set_size(size.width, size.height, window.scale_factor() as f32);
 
-        let (scene, sheet) = build_demo_scene();
+        let sheet = build_stylesheet();
+
+        let mut session = Session::open(&self.db_path).expect("failed to open session db");
+        for path in &self.initial_files {
+            let idx = session.open_file(path).unwrap_or(0);
+            session.set_active(idx);
+        }
 
         self.state = Some(AppState {
             window,
@@ -127,8 +137,9 @@ impl ApplicationHandler for App {
             hint: true,
             use_femtovg: false,
             femtovg_fonts: None,
-            scene,
             sheet,
+            session,
+            modifiers: Modifiers::default(),
         });
     }
 
@@ -136,27 +147,76 @@ impl ApplicationHandler for App {
         let Some(state) = &mut self.state else { return };
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                let _ = state.session.sync_now();
+                event_loop.exit();
+            }
+            WindowEvent::ModifiersChanged(mods) => {
+                state.modifiers = mods;
+            }
             WindowEvent::KeyboardInput { event, .. } => {
-                use winit::keyboard::Key;
-                if event.state == winit::event::ElementState::Pressed {
-                    match event.logical_key {
-                        Key::Character(ref s) if s == "f" || s == "F" => {
-                            state.use_femtovg = !state.use_femtovg;
-                            eprintln!("use_femtovg = {}", state.use_femtovg);
-                            state.window.request_redraw();
-                        }
-                        Key::Character(ref s) if s == "h" || s == "H" => {
-                            state.hint = !state.hint;
-                            state.glyph_cache = GlyphCache::new(); // flush cache on hint change
-                            eprintln!("hint = {}", state.hint);
-                            state.window.request_redraw();
-                        }
-                        _ => {}
+                if event.state != ElementState::Pressed { return; }
+                use winit::keyboard::{Key, NamedKey};
+                let ctrl = state.modifiers.state().control_key();
+                let buf = state.session.active_mut();
+                let mut dirty = true;
+                match &event.logical_key {
+                    Key::Character(s) if ctrl && (s == "z" || s == "Z") => { buf.undo(); }
+                    Key::Character(s) if ctrl && (s == "y" || s == "Y") => { buf.redo(); }
+                    Key::Character(s) if ctrl && (s == "s" || s == "S") => {
+                        let _ = state.session.save_active();
+                        dirty = false;
                     }
+                    // debug toggles
+                    Key::Character(s) if ctrl && (s == "f" || s == "F") => {
+                        state.use_femtovg = !state.use_femtovg;
+                        dirty = true;
+                    }
+                    Key::Character(s) if ctrl && (s == "h" || s == "H") => {
+                        state.hint = !state.hint;
+                        state.glyph_cache = GlyphCache::new();
+                        dirty = true;
+                    }
+                    Key::Named(NamedKey::Backspace) => { buf.backspace(); }
+                    Key::Named(NamedKey::Delete) => { buf.delete_forward(); }
+                    Key::Named(NamedKey::Enter) => { buf.insert("\n"); }
+                    Key::Named(NamedKey::Tab) => { buf.insert("    "); }
+                    Key::Named(NamedKey::ArrowLeft) => {
+                        let pos = buf.cursor;
+                        let (l, c) = if pos.col > 0 { (pos.line, pos.col - 1) } else if pos.line > 0 { (pos.line - 1, buf.line(pos.line - 1).len()) } else { (0, 0) };
+                        buf.move_cursor(l, c);
+                    }
+                    Key::Named(NamedKey::ArrowRight) => {
+                        let pos = buf.cursor;
+                        let line_len = buf.line(pos.line).len();
+                        let (l, c) = if pos.col < line_len { (pos.line, pos.col + 1) } else if pos.line + 1 < buf.line_count() { (pos.line + 1, 0) } else { (pos.line, pos.col) };
+                        buf.move_cursor(l, c);
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        let pos = buf.cursor;
+                        if pos.line > 0 { buf.move_cursor(pos.line - 1, pos.col); }
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        let pos = buf.cursor;
+                        if pos.line + 1 < buf.line_count() { buf.move_cursor(pos.line + 1, pos.col); }
+                    }
+                    Key::Named(NamedKey::Home) => {
+                        let line = buf.cursor.line;
+                        buf.move_cursor(line, 0);
+                    }
+                    Key::Named(NamedKey::End) => {
+                        let line = buf.cursor.line;
+                        let len = buf.line(line).len();
+                        buf.move_cursor(line, len);
+                    }
+                    Key::Character(s) if !ctrl => { buf.insert(s); }
+                    _ => { dirty = false; }
                 }
+                if dirty { state.window.request_redraw(); }
             }
             WindowEvent::RedrawRequested => {
+                let _ = state.session.tick();
+
                 let size = state.window.inner_size();
                 let w = size.width as f32;
                 let h = size.height as f32;
@@ -166,15 +226,15 @@ impl ApplicationHandler for App {
                 state.canvas.clear_rect(0, 0, size.width, size.height,
                     femtovg::Color::rgbf(0.15, 0.15, 0.18));
 
-                apply_styles(&mut state.scene, &state.sheet, &[], None);
+                let mut scene = build_scene(&state.session, &state.sheet);
+                apply_styles(&mut scene, &state.sheet, &[], None);
                 let mut measurer = render::femtovg_measurer::SwashMeasurer {
                     sans_data: SANS_BYTES,
                     mono_data: MONO_BYTES,
                 };
-                let mut lb = layout(&state.scene, Constraints::new(w, h), &mut measurer);
+                let mut lb = layout(&scene, Constraints::new(w, h), &mut measurer);
                 finalize_positions(&mut lb);
 
-                // Lazy-load femtovg fonts (needed for the femtovg debug path).
                 if state.femtovg_fonts.is_none() {
                     let sans_id = state.canvas.add_font_mem(SANS_BYTES).expect("load sans");
                     let mono_id = state.canvas.add_font_mem(MONO_BYTES).expect("load mono");
@@ -190,7 +250,7 @@ impl ApplicationHandler for App {
                     use_femtovg: state.use_femtovg,
                     femtovg_fonts: state.femtovg_fonts,
                 };
-                paint_tree(&mut ctx, &state.scene, &lb);
+                paint_tree(&mut ctx, &scene, &lb);
 
                 state.canvas.flush();
                 state.gl_surface.swap_buffers(&state.gl_context).unwrap();
@@ -216,10 +276,9 @@ impl ApplicationHandler for App {
     }
 }
 
-fn build_demo_scene() -> (Node, Stylesheet) {
+fn build_stylesheet() -> Stylesheet {
     let mut sheet = Stylesheet::new();
 
-    // Root fills the window
     sheet.add(Selector::Tag("root".into()), vec![
         StyleDecl::Display(Display::Flex),
         StyleDecl::FlexDirection(FlexDirection::Column),
@@ -228,80 +287,6 @@ fn build_demo_scene() -> (Node, Stylesheet) {
         StyleDecl::BackgroundColor(Color::rgb(0.15, 0.15, 0.18)),
     ]);
 
-    // Toolbar
-    sheet.add(Selector::Class("toolbar".into()), vec![
-        StyleDecl::Display(Display::Flex),
-        StyleDecl::FlexDirection(FlexDirection::Row),
-        StyleDecl::AlignItems(AlignItems::Center),
-        StyleDecl::Height(Length::Px(40.0)),
-        StyleDecl::BackgroundColor(Color::rgb(0.2, 0.2, 0.25)),
-        StyleDecl::Padding(Edges::uniform_px(6.0)),
-        StyleDecl::Gap(8.0),
-    ]);
-
-    // Toolbar buttons
-    sheet.add(Selector::Class("btn".into()), vec![
-        StyleDecl::Display(Display::InlineBlock),
-        StyleDecl::BackgroundColor(Color::rgb(0.3, 0.5, 0.8)),
-        StyleDecl::Color(Color::WHITE),
-        StyleDecl::Padding(Edges::uniform_px(6.0)),
-        StyleDecl::BorderRadius(4.0),
-        StyleDecl::FontSize(13.0),
-    ]);
-
-    // Editor body: sidebar + editor area
-    sheet.add(Selector::Class("body".into()), vec![
-        StyleDecl::Display(Display::Flex),
-        StyleDecl::FlexDirection(FlexDirection::Row),
-        StyleDecl::FlexGrow(1.0),
-    ]);
-
-    // Sidebar
-    sheet.add(Selector::Class("sidebar".into()), vec![
-        StyleDecl::Width(Length::Px(200.0)),
-        StyleDecl::BackgroundColor(Color::rgb(0.18, 0.18, 0.22)),
-        StyleDecl::Padding(Edges::uniform_px(12.0)),
-    ]);
-
-    // Sidebar file entries
-    sheet.add(Selector::Class("file-entry".into()), vec![
-        StyleDecl::Display(Display::Block),
-        StyleDecl::Color(Color::rgb(0.75, 0.75, 0.85)),
-        StyleDecl::FontSize(13.0),
-        StyleDecl::Padding(Edges { top: Length::Px(3.0), bottom: Length::Px(3.0), left: Length::Zero, right: Length::Zero }),
-    ]);
-    sheet.add(Selector::And(vec![Selector::Class("file-entry".into()), Selector::Class("active".into())]), vec![
-        StyleDecl::Color(Color::WHITE),
-        StyleDecl::BackgroundColor(Color::rgba(0.3, 0.5, 0.9, 0.3)),
-    ]);
-
-    // Editor pane
-    sheet.add(Selector::Class("editor".into()), vec![
-        StyleDecl::FlexGrow(1.0),
-        StyleDecl::BackgroundColor(Color::rgb(0.13, 0.13, 0.16)),
-        StyleDecl::Padding(Edges::uniform_px(16.0)),
-        StyleDecl::FontFamily("monospace".into()),
-        StyleDecl::FontSize(14.0),
-        StyleDecl::Color(Color::rgb(0.85, 0.85, 0.9)),
-    ]);
-
-    // Code lines
-    sheet.add(Selector::Class("line".into()), vec![
-        StyleDecl::Display(Display::Block),
-        StyleDecl::LineHeight(1.6),
-        StyleDecl::FontSize(14.0),
-    ]);
-    sheet.add(Selector::Class("keyword".into()), vec![
-        StyleDecl::Color(Color::rgb(0.5, 0.7, 1.0)),
-    ]);
-    sheet.add(Selector::Class("string".into()), vec![
-        StyleDecl::Color(Color::rgb(0.6, 0.9, 0.6)),
-    ]);
-    sheet.add(Selector::Class("comment".into()), vec![
-        StyleDecl::Color(Color::rgb(0.5, 0.55, 0.6)),
-    ]);
-
-    // Status bar
     sheet.add(Selector::Class("statusbar".into()), vec![
         StyleDecl::Display(Display::Flex),
         StyleDecl::FlexDirection(FlexDirection::Row),
@@ -314,59 +299,105 @@ fn build_demo_scene() -> (Node, Stylesheet) {
         StyleDecl::FontSize(12.0),
     ]);
 
-    // Build tree
-    let toolbar = Node::element("div")
-        .with_class("toolbar")
-        .with_child(Node::element("div").with_class("btn").with_child(Node::text("File")))
-        .with_child(Node::element("div").with_class("btn").with_child(Node::text("Edit")))
-        .with_child(Node::element("div").with_class("btn").with_child(Node::text("View")));
+    sheet.add(Selector::Class("editor".into()), vec![
+        StyleDecl::FlexGrow(1.0),
+        StyleDecl::BackgroundColor(Color::rgb(0.13, 0.13, 0.16)),
+        StyleDecl::Padding(Edges::uniform_px(16.0)),
+        StyleDecl::FontFamily("monospace".into()),
+        StyleDecl::FontSize(14.0),
+        StyleDecl::Color(Color::rgb(0.85, 0.85, 0.9)),
+        StyleDecl::OverflowY(Overflow::Hidden),
+    ]);
 
-    let sidebar = Node::element("div")
-        .with_class("sidebar")
-        .with_child(Node::element("div").with_class("file-entry").with_class("active").with_child(Node::text("main.rs")))
-        .with_child(Node::element("div").with_class("file-entry").with_child(Node::text("render/mod.rs")))
-        .with_child(Node::element("div").with_class("file-entry").with_child(Node::text("render/style.rs")))
-        .with_child(Node::element("div").with_class("file-entry").with_child(Node::text("render/layout.rs")))
-        .with_child(Node::element("div").with_class("file-entry").with_child(Node::text("render/paint.rs")));
+    sheet.add(Selector::Class("line".into()), vec![
+        StyleDecl::Display(Display::Block),
+        StyleDecl::LineHeight(1.4),
+        StyleDecl::FontSize(14.0),
+    ]);
 
-    let editor = Node::element("div")
-        .with_class("editor")
-        .with_child(Node::element("div").with_class("line").with_child(Node::text("// vomvom — custom rendering engine demo")))
-        .with_child(Node::element("div").with_class("line").with_child(Node::text("")))
-        .with_child(Node::element("div").with_class("line").with_child(Node::text("mod render;")))
-        .with_child(Node::element("div").with_class("line").with_child(Node::text("")))
-        .with_child(Node::element("div").with_class("line").with_child(Node::text("fn main() {")))
-        .with_child(Node::element("div").with_class("line").with_child(Node::text("    // build scene, run event loop")))
-        .with_child(Node::element("div").with_class("line").with_child(Node::text("}")));
+    sheet.add(Selector::Class("cursor-line".into()), vec![
+        StyleDecl::BackgroundColor(Color::rgba(1.0, 1.0, 1.0, 0.05)),
+    ]);
 
-    let body = Node::element("div")
-        .with_class("body")
-        .with_child(sidebar)
-        .with_child(editor);
+    sheet
+}
+
+fn build_scene(session: &Session, _sheet: &Stylesheet) -> Node {
+    let buf = session.active();
+    let cursor = buf.cursor;
+
+    let line_count = buf.line_count();
+    let path_label = buf.path.as_deref().unwrap_or("[untitled]");
+    let modified_marker = if buf.is_modified { " ●" } else { "" };
+    let status_left = format!("{}{}", path_label, modified_marker);
+    let status_right = format!("Ln {}, Col {}  UTF-8", cursor.line + 1, cursor.col + 1);
+
+    let mut editor = Node::element("div").with_class("editor");
+    for i in 0..line_count {
+        let text = buf.line(i).to_string();
+        let mut line_node = Node::element("div").with_class("line");
+        if i == cursor.line {
+            line_node = line_node.with_class("cursor-line");
+        }
+        line_node = line_node.with_child(Node::text(if text.is_empty() { " ".into() } else { text }));
+        editor = editor.with_child(line_node);
+    }
 
     let statusbar = Node::element("div")
         .with_class("statusbar")
-        .with_child(Node::text("main.rs"))
-        .with_child(Node::text("Ln 1, Col 1  UTF-8  Rust"));
+        .with_child(Node::text(status_left))
+        .with_child(Node::text(status_right));
 
-    let root = Node::element("root")
-        .with_child(toolbar)
-        .with_child(body)
-        .with_child(statusbar);
+    Node::element("root")
+        .with_child(editor)
+        .with_child(statusbar)
+}
 
-    (root, sheet)
+pub fn build_demo_scene() -> (Node, Stylesheet) {
+    let sheet = build_stylesheet();
+    // Build a static demo using a temporary session so screenshot still works.
+    let session = Session::open(":memory:").expect("in-memory session");
+    let scene = build_scene(&session, &sheet);
+    (scene, sheet)
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    args.remove(0); // strip binary name
+
     if let Some(pos) = args.iter().position(|a| a == "--screenshot") {
-        let path = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("screenshots/screenshot.png");
+        args.remove(pos);
+        let path = args.get(0).map(|s| s.as_str()).unwrap_or("screenshots/screenshot.png");
         std::fs::create_dir_all("screenshots").unwrap();
         screenshot::save_screenshot(std::path::Path::new(path), 1024, 768);
         return;
     }
 
+    let db_path = std::env::var("VOMVOM_DB")
+        .unwrap_or_else(|_| {
+            let mut p = dirs_or_local();
+            p.push("vomvom_session.db");
+            p.to_string_lossy().into_owned()
+        });
+
     let event_loop = EventLoop::new().unwrap();
-    let mut app = App::new();
+    let mut app = App::new(db_path, args);
     event_loop.run_app(&mut app).unwrap();
+}
+
+fn dirs_or_local() -> std::path::PathBuf {
+    // Try %APPDATA% on Windows, ~/.local/share on Linux, else cwd.
+    if let Some(dir) = std::env::var_os("APPDATA") {
+        let mut p = std::path::PathBuf::from(dir);
+        p.push("vomvom");
+        let _ = std::fs::create_dir_all(&p);
+        return p;
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let mut p = std::path::PathBuf::from(home);
+        p.push(".local/share/vomvom");
+        let _ = std::fs::create_dir_all(&p);
+        return p;
+    }
+    std::path::PathBuf::from(".")
 }
