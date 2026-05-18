@@ -397,6 +397,7 @@ dependencies = [
  "rgb",
  "rustybuzz",
  "slotmap",
+ "swash",
  "ttf-parser",
  "unicode-bidi",
  "unicode-segmentation",
