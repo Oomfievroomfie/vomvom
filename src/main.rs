@@ -452,7 +452,7 @@ impl ApplicationHandler for App {
                     state.highlight_dirty = false;
                     rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
                 }
-                sync_doc_to_session(&mut state.doc, &state.session, &state.highlight_cache, visible_lines(editor_h, state.editor_font_size));
+                sync_doc_to_session(&mut state.doc, &state.session, &state.highlight_cache, visible_lines(editor_h, state.editor_font_size) + 1);
 
                 state.canvas.set_size(size.width, size.height, scale);
                 state.canvas.clear_rect(0, 0, size.width, size.height,
