@@ -86,8 +86,7 @@ fn layout_text(node: &Node, constraints: Constraints, measurer: &mut dyn TextMea
     let s = &node.style;
     let h = s.font_size * s.line_height;
     let text = match &node.content { NodeContent::Text(t) => t.as_str(), _ => "" };
-    let w = measurer.measure_width(text, s.font_size, &s.font_family)
-        .min(constraints.available_w.max(0.0).min(1_000_000.0));
+    let w = measurer.measure_width(text, s.font_size, &s.font_family);
     let r = Rect::new(0.0, 0.0, w, h);
     LayoutBox::leaf(r, r)
 }

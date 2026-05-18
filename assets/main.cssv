@@ -101,6 +101,7 @@ root {
 
 .line span {
     display: inline-block;
+    flex-shrink: 0;
 }
 
 .tok-kw {
