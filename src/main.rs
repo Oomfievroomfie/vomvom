@@ -67,6 +67,7 @@ struct AppState {
     debug_boxes: bool,
     scrollbar_drag: bool,
     highlight_cache: std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>,
+    last_input: Option<Instant>,
 }
 
 impl App {
@@ -166,6 +167,7 @@ impl ApplicationHandler for App {
             debug_boxes: false,
             scrollbar_drag: false,
             highlight_cache,
+            last_input: None,
         });
     }
 
@@ -181,6 +183,7 @@ impl ApplicationHandler for App {
                 state.modifiers = mods;
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                state.last_input = Some(Instant::now());
                 if event.state != ElementState::Pressed { return; }
                 use winit::keyboard::{Key, NamedKey};
                 let ctrl = state.modifiers.state().control_key();
@@ -281,6 +284,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                state.last_input = Some(Instant::now());
                 state.mouse_pos = (position.x as f32, position.y as f32);
                 if state.scrollbar_drag {
                     let (mx, my) = state.mouse_pos;
@@ -300,9 +304,11 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: winit::event::MouseButton::Left, .. } => {
+                state.last_input = Some(Instant::now());
                 state.scrollbar_drag = false;
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: winit::event::MouseButton::Left, .. } => {
+                state.last_input = Some(Instant::now());
                 let (mx, my) = state.mouse_pos;
                 if let Some(ref lb) = state.last_layout.clone() {
                     // Menu item click (dropdown open)?
@@ -356,6 +362,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                state.last_input = Some(Instant::now());
                 use winit::event::MouseScrollDelta;
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => -y as f32,
@@ -370,6 +377,7 @@ impl ApplicationHandler for App {
                 state.needs_redraw = true;
             }
             WindowEvent::Ime(ime_event) => {
+                state.last_input = Some(Instant::now());
                 use winit::event::Ime;
                 match ime_event {
                     Ime::Commit(text) => {
@@ -464,9 +472,11 @@ impl ApplicationHandler for App {
                 state.window.request_redraw();
             }
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(250),
-        ));
+        let high_rate = self.state.as_ref()
+            .and_then(|s| s.last_input)
+            .map_or(false, |t| t.elapsed() < Duration::from_millis(100));
+        let interval = if high_rate { Duration::from_millis(8) } else { Duration::from_millis(250) };
+        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + interval));
     }
 }
 
