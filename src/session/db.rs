@@ -8,7 +8,7 @@
 
 use rusqlite::{Connection, params};
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -68,12 +68,18 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         ")?;
     }
     if version < 2 {
-        // Add group_id if it doesn't exist yet (schema created fresh with v1 already has it).
         let col_exists = conn.prepare("SELECT group_id FROM undo_ops LIMIT 0").is_ok();
         if !col_exists {
             conn.execute_batch("ALTER TABLE undo_ops ADD COLUMN group_id INTEGER NOT NULL DEFAULT 0;")?;
         }
         conn.execute_batch("PRAGMA user_version = 2;")?;
+    }
+    if version < 3 {
+        let col_exists = conn.prepare("SELECT disk_mtime FROM buffers LIMIT 0").is_ok();
+        if !col_exists {
+            conn.execute_batch("ALTER TABLE buffers ADD COLUMN disk_mtime INTEGER;")?;
+        }
+        conn.execute_batch("PRAGMA user_version = 3;")?;
     }
     Ok(())
 }
@@ -89,11 +95,12 @@ pub struct BufferRow {
     pub cursor_col: i64,
     pub scroll_line: i64,
     pub is_modified: bool,
+    pub disk_mtime: Option<u64>,
 }
 
 pub fn load_all_buffers(conn: &Connection) -> rusqlite::Result<Vec<BufferRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, content, cursor_line, cursor_col, scroll_line, is_modified
+        "SELECT id, path, content, cursor_line, cursor_col, scroll_line, is_modified, disk_mtime
          FROM buffers ORDER BY id"
     )?;
     let rows = stmt.query_map([], |r| Ok(BufferRow {
@@ -104,6 +111,7 @@ pub fn load_all_buffers(conn: &Connection) -> rusqlite::Result<Vec<BufferRow>> {
         cursor_col: r.get(4)?,
         scroll_line: r.get(5)?,
         is_modified: r.get::<_, i64>(6)? != 0,
+        disk_mtime: r.get::<_, Option<i64>>(7)?.map(|v| v as u64),
     }))?;
     rows.collect()
 }
@@ -117,13 +125,13 @@ pub fn insert_buffer(conn: &Connection, path: Option<&str>, content: &str) -> ru
 }
 
 /// Sync a dirty buffer's content and cursor state. Called inside a transaction.
-pub fn sync_buffer(conn: &Connection, id: i64, content: &str, cursor_line: i64, cursor_col: i64, scroll_line: i64, is_modified: bool) -> rusqlite::Result<()> {
+pub fn sync_buffer(conn: &Connection, id: i64, content: &str, cursor_line: i64, cursor_col: i64, scroll_line: i64, is_modified: bool, disk_mtime: Option<u64>) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE buffers SET content=?1, cursor_line=?2, cursor_col=?3,
-         scroll_line=?4, is_modified=?5,
+         scroll_line=?4, is_modified=?5, disk_mtime=?6,
          updated_at=strftime('%s','now')
-         WHERE id=?6",
-        params![content, cursor_line, cursor_col, scroll_line, is_modified as i64, id],
+         WHERE id=?7",
+        params![content, cursor_line, cursor_col, scroll_line, is_modified as i64, disk_mtime.map(|v| v as i64), id],
     )?;
     Ok(())
 }
@@ -282,7 +290,7 @@ mod tests {
     fn test_sync_buffer() {
         let conn = mem_db();
         let id = insert_buffer(&conn, Some("/a.rs"), "old").unwrap();
-        sync_buffer(&conn, id, "new content", 5, 10, 2, true).unwrap();
+        sync_buffer(&conn, id, "new content", 5, 10, 2, true, Some(1700000000)).unwrap();
         let buffers = load_all_buffers(&conn).unwrap();
         assert_eq!(buffers[0].content, "new content");
         assert_eq!(buffers[0].cursor_line, 5);

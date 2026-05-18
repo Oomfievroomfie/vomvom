@@ -532,12 +532,26 @@ fn make_tab_node(b: &session::buffer::Buffer, idx: usize, active: bool) -> Node 
         .and_then(|n| n.to_str())
         .unwrap_or("[untitled]")
         .to_string();
-    let modified = if b.is_modified { " ●" } else { "" };
+    let dot = match buf_status_class(b) {
+        Some(_) => " •",
+        None    => "",
+    };
     let mut tab = Node::element("div").with_class("tab")
         .with_attr("tab-idx", &idx.to_string())
-        .with_child(Node::text(format!("{}{}", label, modified)));
+        .with_child(Node::text(format!("{}{}", label, dot)));
     if active { tab = tab.with_class("active"); }
+    if let Some(cls) = buf_status_class(b) { tab = tab.with_class(cls); }
     tab
+}
+
+fn buf_status_class(b: &session::buffer::Buffer) -> Option<&'static str> {
+    use session::buffer::DiskStatus;
+    match b.disk_status {
+        DiskStatus::Deleted  => Some("status-deleted"),
+        DiskStatus::Diverged => Some("status-diverged"),
+        DiskStatus::Ok if b.is_modified => Some("status-modified"),
+        _ => None,
+    }
 }
 
 const SCROLLBAR_MIN_THUMB_PX: f32 = 32.0;
@@ -648,10 +662,16 @@ fn update_statusbar_node(root: &mut Node, session: &Session) {
     let buf = session.active();
     let cursor = buf.cursor;
     let path_label = buf.path.as_deref().unwrap_or("[untitled]");
-    let modified_marker = if buf.is_modified { " ●" } else { "" };
-    let status_left = format!("{}{}", path_label, modified_marker);
     let status_right = format!("Ln {}, Col {}  UTF-8", cursor.line + 1, cursor.col + 1);
-    if let Some(n) = root.get_element_by_id("status-left") { n.set_text_content(status_left); }
+    if let Some(n) = root.get_element_by_id("status-left") {
+        let cls = buf_status_class(buf);
+        let dot = if cls.is_some() { " •" } else { "" };
+        n.set_text_content(format!("{}{}", path_label, dot));
+        n.remove_class("status-modified");
+        n.remove_class("status-diverged");
+        n.remove_class("status-deleted");
+        if let Some(c) = cls { n.add_class(c); }
+    }
     if let Some(n) = root.get_element_by_id("status-right") { n.set_text_content(status_right); }
 }
 
@@ -720,14 +740,31 @@ fn close_all_menus(doc: &mut Document) {
 }
 
 pub fn build_demo_scene() -> (Node, Stylesheet) {
+    use session::buffer::DiskStatus;
     let sheet = build_stylesheet();
     let mut session = Session::open(":memory:").expect("in-memory session");
     session.active_mut().path = Some("demo.rs".into());
     session.active_mut().insert("// vomvom — custom rendering engine\n\nmod render;\n\nfn main() {\n    // build scene, run event loop\n    println!(\"hello world\");\n}");
+    session.active_mut().disk_status = DiskStatus::Diverged;
+
+    // Extra tabs for visual testing.
+    let id2 = session::db::insert_buffer(&session.conn, Some("/tmp/modified.rs"), "hello").unwrap();
+    let mut buf2 = session::buffer::Buffer::new(id2, Some("/tmp/modified.rs".into()), "hello");
+    buf2.is_modified = true;
+    session.buffers.push(buf2);
+
+    let id3 = session::db::insert_buffer(&session.conn, Some("/tmp/deleted.rs"), "").unwrap();
+    let mut buf3 = session::buffer::Buffer::new(id3, Some("/tmp/deleted.rs".into()), "");
+    buf3.disk_status = DiskStatus::Deleted;
+    session.buffers.push(buf3);
+
+    let id4 = session::db::insert_buffer(&session.conn, None, "").unwrap();
+    let buf4 = session::buffer::Buffer::new(id4, None, "");
+    session.buffers.push(buf4);
+
     let mut cache = std::collections::HashMap::new();
     rebuild_highlight_cache(&mut cache, &session);
     let mut doc = Document::new(build_initial_document(&session, &cache));
-    open_menu(&mut doc, "file");
     (doc.root, sheet)
 }
 

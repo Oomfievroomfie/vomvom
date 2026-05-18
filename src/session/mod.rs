@@ -3,7 +3,7 @@ pub mod buffer;
 
 use std::time::{Duration, Instant};
 use rusqlite::Connection;
-use crate::session::buffer::Buffer;
+use crate::session::buffer::{Buffer, DiskStatus};
 use crate::session::db::{
     load_all_buffers, load_undo_ops, load_undo_state,
     insert_buffer, sync_buffer, sync_undo_ops,
@@ -11,6 +11,7 @@ use crate::session::db::{
 };
 
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const MTIME_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct Session {
     pub conn: Connection,
@@ -32,10 +33,14 @@ impl Session {
             buf.is_modified = row.is_modified;
             buf.cursor = crate::session::buffer::Pos::new(row.cursor_line as usize, row.cursor_col as usize);
             buf.scroll_line = row.scroll_line as usize;
+            buf.disk_mtime = row.disk_mtime;
 
             let ops = load_undo_ops(&conn, row.id)?;
             let cur_seq = load_undo_state(&conn, row.id)?;
             buf.restore_undo(ops, cur_seq);
+
+            // Check disk status immediately on load so icons are correct from the start.
+            buf.refresh_disk_status();
 
             buffers.push(buf);
         }
@@ -82,15 +87,24 @@ impl Session {
         }
         let content = std::fs::read_to_string(path).unwrap_or_default();
         let id = insert_buffer(&self.conn, Some(path), &content)?;
-        let buf = Buffer::new(id, Some(path.to_string()), &content);
+        let mut buf = Buffer::new(id, Some(path.to_string()), &content);
+        buf.disk_mtime = Buffer::current_disk_mtime(path);
+        buf.disk_status = DiskStatus::Ok;
         self.buffers.push(buf);
         Ok(self.buffers.len() - 1)
     }
 
     /// Call this on every frame/tick. Syncs dirty buffers if the interval has elapsed.
+    /// Also sparsely refreshes disk status for the active buffer.
     pub fn tick(&mut self) -> rusqlite::Result<()> {
         if self.last_sync.elapsed() >= SYNC_INTERVAL {
             self.sync_now()?;
+        }
+        let buf = &mut self.buffers[self.active_idx];
+        let needs_check = buf.path.is_some() && buf.last_mtime_check
+            .map_or(true, |t| t.elapsed() >= MTIME_CHECK_INTERVAL);
+        if needs_check {
+            buf.refresh_disk_status();
         }
         Ok(())
     }
@@ -109,6 +123,7 @@ impl Session {
                 buf.cursor.col as i64,
                 buf.scroll_line as i64,
                 buf.is_modified,
+                buf.disk_mtime,
             )?;
             sync_undo_ops(&tx, buf.id, buf.undo_ops(), buf.current_seq())?;
             buf.dirty = false;
@@ -128,8 +143,10 @@ impl Session {
             std::io::Error::new(std::io::ErrorKind::Other, "buffer has no path")
         })?;
         std::fs::write(&path, buf.content())?;
+        buf.disk_mtime = Buffer::current_disk_mtime(&path);
+        buf.disk_status = DiskStatus::Ok;
         buf.is_modified = false;
-        buf.dirty = true; // need to persist the is_modified=false
+        buf.dirty = true; // need to persist the is_modified=false and disk_mtime
         Ok(())
     }
 }

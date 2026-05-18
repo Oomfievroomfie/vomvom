@@ -42,6 +42,10 @@ root {
     background-color: rgba(43, 43, 54, 1.0);
 }
 
+.tab span {
+    display: inline;
+}
+
 .tab.active {
     color: white;
     background-color: rgba(33, 33, 41, 1.0);
@@ -169,4 +173,16 @@ root {
     height: 1px;
     background-color: rgba(89, 89, 115, 1.0);
     margin: 3px 0;
+}
+
+.status-modified {
+    color: rgba(160, 160, 160, 1.0);
+}
+
+.status-diverged {
+    color: rgba(230, 140, 40, 1.0);
+}
+
+.status-deleted {
+    color: rgba(210, 60, 60, 1.0);
 }

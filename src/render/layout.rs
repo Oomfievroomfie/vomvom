@@ -128,8 +128,8 @@ fn layout_element(node: &Node, constraints: Constraints, measurer: &mut dyn Text
     let chrome_x = pl + pr + bw * 2.0;
     let chrome_y = pt + pb + bw * 2.0;
 
-    // Block fills available width; inline-block/flex shrink-wraps when width is auto.
-    let shrink_wrap = matches!(s.display, Display::InlineBlock | Display::Inline)
+    // Block/Flex fills available width; inline variants shrink-wrap when width is auto.
+    let shrink_wrap = matches!(s.display, Display::InlineBlock | Display::Inline | Display::InlineFlex)
         && s.width == Length::Auto;
     let fill_w = constraints.available_w.min(1_000_000.0); // don't fill infinite space
     let inner_w = resolve_length(s.width, constraints.available_w)
@@ -144,7 +144,7 @@ fn layout_element(node: &Node, constraints: Constraints, measurer: &mut dyn Text
     // Children are laid out in local space relative to this node's content rect.
     // Absolute children get placeholder slots; layout_absolute_children fills them in.
     let mut children = match s.display {
-        Display::Flex => {
+        Display::Flex | Display::InlineFlex => {
             let in_flow = layout_flex(node, content_constraints, s.flex_direction, s.align_items, s.justify_content, s.gap, measurer);
             // Re-merge: insert placeholder slots for absolute children at their original indices.
             let mut result = Vec::with_capacity(node.children().len());

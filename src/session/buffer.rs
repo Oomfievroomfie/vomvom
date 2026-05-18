@@ -6,6 +6,13 @@ use crate::session::db::{OpKind, UndoOp};
 use ropey::Rope;
 use std::time::Instant;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskStatus {
+    Ok,       // file matches what editor last read/wrote
+    Diverged, // file exists but mtime differs from when we loaded/saved
+    Deleted,  // path is set but file no longer exists
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Pos {
     pub line: usize,
@@ -27,6 +34,11 @@ pub struct Buffer {
     pub scroll_line: usize,
     pub is_modified: bool,
     pub dirty: bool,
+    /// mtime (secs since unix epoch) of the file when last loaded or saved.
+    /// None for untitled buffers.
+    pub disk_mtime: Option<u64>,
+    pub disk_status: DiskStatus,
+    pub last_mtime_check: Option<Instant>,
 
     ops: Vec<UndoOp>,
     undo_head: Option<usize>,
@@ -47,6 +59,9 @@ impl Buffer {
             scroll_line: 0,
             is_modified: false,
             dirty: false,
+            disk_mtime: None,
+            disk_status: DiskStatus::Ok,
+            last_mtime_check: None,
             ops: Vec::new(),
             undo_head: None,
             next_seq: 0,
@@ -54,6 +69,29 @@ impl Buffer {
             last_edit_kind: None,
             last_edit_time: None,
             last_insert_was_separator: false,
+        }
+    }
+
+    /// Read current file mtime without updating state. Returns None for untitled or missing file.
+    pub fn current_disk_mtime(path: &str) -> Option<u64> {
+        std::fs::metadata(path).ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+    }
+
+    /// Check disk mtime and update disk_status. Call sparsely.
+    pub fn refresh_disk_status(&mut self) {
+        self.last_mtime_check = Some(Instant::now());
+        let Some(ref path) = self.path else { return };
+        match Self::current_disk_mtime(path) {
+            None => { self.disk_status = DiskStatus::Deleted; }
+            Some(mtime) => {
+                self.disk_status = match self.disk_mtime {
+                    Some(expected) if expected == mtime => DiskStatus::Ok,
+                    _ => DiskStatus::Diverged,
+                };
+            }
         }
     }
 

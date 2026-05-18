@@ -19,6 +19,7 @@ pub enum Display {
     Inline,
     InlineBlock,
     Flex,
+    InlineFlex,
     None,
 }
 

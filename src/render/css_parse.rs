@@ -388,6 +388,7 @@ fn parse_display(val: &str) -> Option<Display> {
         "inline" => Some(Display::Inline),
         "inline-block" => Some(Display::InlineBlock),
         "flex" => Some(Display::Flex),
+        "inline-flex" => Some(Display::InlineFlex),
         "none" => Some(Display::None),
         _ => None,
     }
