@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn test_roundtrip_stylesheet() {
         // Parse the full app stylesheet from text and verify rule count matches Rust-built version.
-        let css = include_str!("../../assets/main.css");
+        let css = include_str!("../../assets/main.cssv");
         let sheet = parse_stylesheet(css);
         // Rust version has 14 rules (including the comma-split ones)
         assert!(sheet.rules.len() >= 12, "expected at least 12 rules, got {}", sheet.rules.len());

@@ -1,0 +1,6 @@
+<div class="dropdown">
+    <div class="menu-item" action="open">Open...    Ctrl+O</div>
+    <div class="menu-item" action="save">Save       Ctrl+S</div>
+    <div class="menu-separator" />
+    <div class="menu-item" action="close-tab">Close Tab</div>
+</div>

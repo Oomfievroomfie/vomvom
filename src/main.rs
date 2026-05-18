@@ -29,9 +29,12 @@ use render::style::Stylesheet;
 use render::tree::{Node, apply_styles};
 use render::glyph_cache::GlyphCache;
 use render::css_parse::parse_stylesheet;
+use render::html_parse::parse_html;
 use session::Session;
 
-static MAIN_CSS: &str = include_str!("../assets/main.css");
+static MAIN_CSS: &str = include_str!("../assets/main.cssv");
+static DROPDOWN_FILE: &str = include_str!("../assets/dropdown_file.htmv");
+static DROPDOWN_EDIT: &str = include_str!("../assets/dropdown_edit.htmv");
 
 static SANS_BYTES: &[u8] = include_bytes!("../OpenSans-Medium.ttf");
 static MONO_BYTES: &[u8] = include_bytes!("../FiraMono-Regular.ttf");
@@ -438,32 +441,12 @@ fn main() {
 }
 
 fn build_dropdown(menu_id: &str) -> Node {
-    fn item(label: &str, action: &str) -> Node {
-        Node::element("div").with_class("menu-item").with_attr("action", action)
-            .with_child(Node::text(label))
-    }
-    fn sep() -> Node {
-        Node::element("div").with_class("menu-separator")
-    }
-
-    let mut dropdown = Node::element("div").with_class("dropdown");
-
-    match menu_id {
-        "file" => {
-            dropdown = dropdown
-                .with_child(item("Open...    Ctrl+O", "open"))
-                .with_child(item("Save       Ctrl+S", "save"))
-                .with_child(sep())
-                .with_child(item("Close Tab", "close-tab"));
-        }
-        "edit" => {
-            dropdown = dropdown
-                .with_child(item("Undo       Ctrl+Z", "undo"))
-                .with_child(item("Redo       Ctrl+Y", "redo"));
-        }
-        _ => {}
-    }
-    dropdown
+    let src = match menu_id {
+        "file" => DROPDOWN_FILE,
+        "edit" => DROPDOWN_EDIT,
+        _ => return Node::element("div").with_class("dropdown"),
+    };
+    parse_html(src).into_iter().next().unwrap_or_else(|| Node::element("div").with_class("dropdown"))
 }
 
 fn execute_menu_action(action: &str, session: &mut Session) {
