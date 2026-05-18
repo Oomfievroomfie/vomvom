@@ -54,7 +54,8 @@ impl<'a> PaintContext<'a> {
         };
         let atlas_f = crate::render::glyph_cache::ATLAS_SIZE as f32;
 
-        let mut pen_x = x.round();
+        //let mut pen_x = x.round();
+        let mut pen_x = x;
         let tint = femtovg::Color::rgbaf(color.r, color.g, color.b, color.a);
 
         for (glyph_id, advance) in &glyphs {

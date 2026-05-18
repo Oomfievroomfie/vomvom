@@ -397,6 +397,87 @@ impl Buffer {
         if ci >= self.rope.len_chars() { return pos; }
         self.char_to_pos(ci + 1)
     }
+
+    fn char_class(c: char) -> u8 {
+        if c == '\n' { 2 } else if c.is_whitespace() { 0 } else if c.is_alphanumeric() || c == '_' { 1 } else { 2 }
+    }
+
+    pub fn word_start_left(&self, pos: Pos) -> Pos {
+        let mut ci = self.pos_to_char(pos);
+        if ci == 0 { return pos; }
+        // step back over whitespace
+        while ci > 0 && Self::char_class(self.rope.char(ci - 1)) == 0 { ci -= 1; }
+        if ci == 0 { return self.char_to_pos(ci); }
+        let cls = Self::char_class(self.rope.char(ci - 1));
+        while ci > 0 && Self::char_class(self.rope.char(ci - 1)) == cls { ci -= 1; }
+        self.char_to_pos(ci)
+    }
+
+    pub fn word_end_right(&self, pos: Pos) -> Pos {
+        let len = self.rope.len_chars();
+        let mut ci = self.pos_to_char(pos);
+        if ci >= len { return pos; }
+        // step over whitespace
+        while ci < len && Self::char_class(self.rope.char(ci)) == 0 { ci += 1; }
+        if ci >= len { return self.char_to_pos(ci); }
+        let cls = Self::char_class(self.rope.char(ci));
+        while ci < len && Self::char_class(self.rope.char(ci)) == cls { ci += 1; }
+        self.char_to_pos(ci)
+    }
+
+    pub fn backspace_word(&mut self) {
+        let end = self.cursor;
+        let start = self.word_start_left(end);
+        if start == end { return; }
+        let sc = self.pos_to_char(start);
+        let ec = self.pos_to_char(end);
+        let deleted: String = self.rope.chars_at(sc).take(ec - sc).collect();
+        self.apply_delete(start, end);
+        self.truncate_redo();
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        let group_id = self.current_group(EditKind::Backspace, &deleted);
+        self.ops.push(UndoOp {
+            seq,
+            kind: OpKind::Delete,
+            line_start: start.line as i64,
+            col_start: start.col as i64,
+            line_end: end.line as i64,
+            col_end: end.col as i64,
+            text: deleted,
+            group_id,
+        });
+        self.undo_head = Some(self.ops.len() - 1);
+        self.is_modified = true;
+        self.dirty = true;
+    }
+
+    pub fn delete_forward_word(&mut self) {
+        let start = self.cursor;
+        let end = self.word_end_right(start);
+        if start == end { return; }
+        let sc = self.pos_to_char(start);
+        let ec = self.pos_to_char(end);
+        let deleted: String = self.rope.chars_at(sc).take(ec - sc).collect();
+        self.apply_delete(start, end);
+        self.truncate_redo();
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        let group_id = self.current_group(EditKind::DeleteForward, &deleted);
+        self.ops.push(UndoOp {
+            seq,
+            kind: OpKind::Delete,
+            line_start: start.line as i64,
+            col_start: start.col as i64,
+            line_end: end.line as i64,
+            col_end: end.col as i64,
+            text: deleted,
+            group_id,
+        });
+        self.undo_head = Some(self.ops.len() - 1);
+        self.is_modified = true;
+        self.dirty = true;
+    }
 }
 
 #[cfg(test)]

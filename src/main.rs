@@ -39,7 +39,7 @@ static DROPDOWN_FILE: &str = include_str!("../assets/dropdown_file.htmv");
 static DROPDOWN_EDIT: &str = include_str!("../assets/dropdown_edit.htmv");
 
 static SANS_BYTES: &[u8] = include_bytes!("../OpenSans-Medium.ttf");
-static MONO_BYTES: &[u8] = include_bytes!("../UbuntuSansMono-Medium.ttf");
+static MONO_BYTES: &[u8] = include_bytes!("../Sono-Medium.ttf");
 
 struct App {
     state: Option<AppState>,
@@ -70,6 +70,7 @@ struct AppState {
     scrollbar_drag: bool,
     highlight_cache: std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>,
     last_input: Option<Instant>,
+    editor_font_size: f32,
 }
 
 impl App {
@@ -137,7 +138,7 @@ impl ApplicationHandler for App {
         let mut canvas = Canvas::new(renderer).expect("failed to create canvas");
         canvas.set_size(size.width, size.height, window.scale_factor() as f32);
 
-        let sheet = build_stylesheet();
+        let sheet = build_stylesheet(11.5);
 
         let mut session = Session::open(&self.db_path).expect("failed to open session db");
         for path in &self.initial_files {
@@ -156,7 +157,7 @@ impl ApplicationHandler for App {
             gl_context,
             glyph_cache: GlyphCache::new(),
             hint: true,
-            use_femtovg: true,
+            use_femtovg: false,
             femtovg_fonts: None,
             sheet,
             session,
@@ -172,6 +173,7 @@ impl ApplicationHandler for App {
             scrollbar_drag: false,
             highlight_cache,
             last_input: None,
+            editor_font_size: 12.0,
         });
     }
 
@@ -234,15 +236,27 @@ impl ApplicationHandler for App {
                     }
                     Key::Character(s) if ctrl && (s == "z" || s == "Z") => { buf.undo(); state.highlight_dirty = true; }
                     Key::Character(s) if ctrl && (s == "y" || s == "Y") => { buf.redo(); state.highlight_dirty = true; }
+                    Key::Named(NamedKey::Backspace) if ctrl => { buf.backspace_word(); state.highlight_dirty = true; }
                     Key::Named(NamedKey::Backspace) => { buf.backspace(); state.highlight_dirty = true; }
+                    Key::Named(NamedKey::Delete) if ctrl => { buf.delete_forward_word(); state.highlight_dirty = true; }
                     Key::Named(NamedKey::Delete) => { buf.delete_forward(); state.highlight_dirty = true; }
                     Key::Named(NamedKey::Enter) => { buf.insert("\n"); state.highlight_dirty = true; }
                     Key::Named(NamedKey::Space) => { buf.insert(" "); state.highlight_dirty = true; }
                     Key::Named(NamedKey::Tab) => { buf.insert("    "); state.highlight_dirty = true; }
+                    Key::Named(NamedKey::ArrowLeft) if ctrl => {
+                        let pos = buf.word_start_left(buf.cursor);
+                        buf.move_cursor(pos.line, pos.col);
+                        buf.break_undo_group();
+                    }
                     Key::Named(NamedKey::ArrowLeft) => {
                         let pos = buf.cursor;
                         let (l, c) = if pos.col > 0 { (pos.line, pos.col - 1) } else if pos.line > 0 { (pos.line - 1, buf.line(pos.line - 1).chars().count()) } else { (0, 0) };
                         buf.move_cursor(l, c);
+                        buf.break_undo_group();
+                    }
+                    Key::Named(NamedKey::ArrowRight) if ctrl => {
+                        let pos = buf.word_end_right(buf.cursor);
+                        buf.move_cursor(pos.line, pos.col);
                         buf.break_undo_group();
                     }
                     Key::Named(NamedKey::ArrowRight) => {
@@ -278,7 +292,7 @@ impl ApplicationHandler for App {
                 }
                 if dirty {
                     let editor_h = editor_content_height(state.window.inner_size().height as f32);
-                    scroll_to_cursor(&mut state.session, editor_h);
+                    scroll_to_cursor(&mut state.session, editor_h, state.editor_font_size);
                     state.needs_redraw = true;
                 }
             }
@@ -293,7 +307,7 @@ impl ApplicationHandler for App {
                             .or_else(|| lb.children.get(2).and_then(|e| e.children.last()))
                         {
                             let track_lb = track_lb.clone();
-                            let scroll = scrollbar_y_to_scroll(&track_lb, &state.session, my, win_h);
+                            let scroll = scrollbar_y_to_scroll(&track_lb, &state.session, my, win_h, state.editor_font_size);
                             state.session.active_mut().scroll_line = scroll;
                             state.needs_redraw = true;
                         }
@@ -334,16 +348,19 @@ impl ApplicationHandler for App {
                     let win_h = state.window.inner_size().height as f32;
                     if let Some(track_lb) = scrollbar_track_lb(lb, mx, my) {
                         let track_lb = track_lb.clone();
-                        let scroll = scrollbar_y_to_scroll(&track_lb, &state.session, my, win_h);
+                        let scroll = scrollbar_y_to_scroll(&track_lb, &state.session, my, win_h, state.editor_font_size);
                         state.session.active_mut().scroll_line = scroll;
                         state.scrollbar_drag = true;
                         state.needs_redraw = true;
-                    } else if let Some((line, col)) = hit_test_editor(lb, &state.session, mx, my, MONO_BYTES) {
+                    } else if let Some((line, col)) = {
+                        let mono_font = state.femtovg_fonts.filter(|_| state.use_femtovg).map(|(_, m)| m);
+                        hit_test_editor(&mut state.canvas, lb, &state.session, mx, my, MONO_BYTES, mono_font, state.editor_font_size)
+                    } {
                         let buf = state.session.active_mut();
                         buf.move_cursor(line, col);
                         buf.break_undo_group();
                         let editor_h = editor_content_height(win_h);
-                        scroll_to_cursor(&mut state.session, editor_h);
+                        scroll_to_cursor(&mut state.session, editor_h, state.editor_font_size);
                         state.needs_redraw = true;
                     }
                 }
@@ -351,14 +368,25 @@ impl ApplicationHandler for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 state.last_input = Some(Instant::now());
                 use winit::event::MouseScrollDelta;
-                let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => -y as f32,
-                    MouseScrollDelta::PixelDelta(pos) => -pos.y as f32 / 20.0,
-                };
-                let buf = state.session.active_mut();
-                let max_scroll = buf.line_count().saturating_sub(1);
-                buf.scroll_line = (buf.scroll_line as f32 + lines).round()
-                    .clamp(0.0, max_scroll as f32) as usize;
+                let ctrl = state.modifiers.state().control_key();
+                if ctrl {
+                    let steps = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y as f32,
+                        MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 20.0,
+                    };
+                    state.editor_font_size = (state.editor_font_size + steps * 0.5).clamp(4.0, 64.0);
+                    state.sheet = build_stylesheet(state.editor_font_size);
+                    state.glyph_cache = GlyphCache::new();
+                } else {
+                    let lines = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => -y as f32,
+                        MouseScrollDelta::PixelDelta(pos) => -pos.y as f32 / 20.0,
+                    };
+                    let buf = state.session.active_mut();
+                    let max_scroll = buf.line_count().saturating_sub(1);
+                    buf.scroll_line = (buf.scroll_line as f32 + lines).round()
+                        .clamp(0.0, max_scroll as f32) as usize;
+                }
                 state.needs_redraw = true;
             }
             WindowEvent::Ime(ime_event) => {
@@ -393,14 +421,14 @@ impl ApplicationHandler for App {
                     state.highlight_dirty = false;
                     rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
                 }
-                sync_doc_to_session(&mut state.doc, &state.session, &state.highlight_cache, visible_lines(editor_h));
+                sync_doc_to_session(&mut state.doc, &state.session, &state.highlight_cache, visible_lines(editor_h, state.editor_font_size));
 
                 state.canvas.set_size(size.width, size.height, scale);
                 state.canvas.clear_rect(0, 0, size.width, size.height,
                     femtovg::Color::rgbf(0.15, 0.15, 0.18));
 
                 apply_styles(&mut state.doc.root, &state.sheet, &[], None);
-                update_scrollbar_styles(&mut state.doc.root, &state.session, editor_h);
+                update_scrollbar_styles(&mut state.doc.root, &state.session, editor_h, state.editor_font_size);
                 let mut measurer = render::femtovg_measurer::SwashMeasurer {
                     sans_data: SANS_BYTES,
                     mono_data: MONO_BYTES,
@@ -436,7 +464,8 @@ impl ApplicationHandler for App {
                     let line_text = buf.line(buf.cursor.line);
                     let layout_line = buf.cursor.line - scroll;
                     let cursors = vec![(layout_line, buf.cursor.col, line_text.as_str())];
-                    paint_cursors_with_text(&mut state.canvas, &lb, &cursors, MONO_BYTES);
+                    let mono_font = state.femtovg_fonts.filter(|_| state.use_femtovg).map(|(_, m)| m);
+                    paint_cursors_with_text(&mut state.canvas, &lb, &cursors, MONO_BYTES, mono_font, state.editor_font_size);
                 }
 
                 state.canvas.flush();
@@ -483,8 +512,14 @@ impl ApplicationHandler for App {
     }
 }
 
-fn build_stylesheet() -> Stylesheet {
-    parse_stylesheet(MAIN_CSS)
+fn build_stylesheet(editor_font_size: f32) -> Stylesheet {
+    let patched = MAIN_CSS
+        .replace(".editor {\n    flex-grow: 1;\n    background-color: rgba(33, 33, 41, 1.0);\n    padding: 16px;\n    font-family: monospace;\n    font-size: 12px;",
+                 &format!(".editor {{\n    flex-grow: 1;\n    background-color: rgba(33, 33, 41, 1.0);\n    padding: 16px;\n    font-family: monospace;\n    font-size: {}px;", editor_font_size));
+    let patched = patched
+        .replace(".line {\n    display: flex;\n    flex-direction: row;\n    line-height: 1.4;\n    font-size: 12px;",
+                 &format!(".line {{\n    display: flex;\n    flex-direction: row;\n    line-height: 1.4;\n    font-size: {}px;", editor_font_size));
+    parse_stylesheet(&patched)
 }
 
 // Build the initial retained document. Called once; subsequent updates use
@@ -568,10 +603,10 @@ fn scrollbar_thumb_geometry(total: usize, scroll: usize, visible: usize, track_h
     Some((top, thumb_h))
 }
 
-fn update_scrollbar_styles(root: &mut Node, session: &Session, editor_h: f32) {
+fn update_scrollbar_styles(root: &mut Node, session: &Session, editor_h: f32, font_size: f32) {
     let buf = session.active();
     let total = buf.line_count();
-    let visible = visible_lines(editor_h);
+    let visible = visible_lines(editor_h, font_size);
 
     let Some(thumb) = root.get_element_by_id("scrollbar-thumb") else { return };
     let Some((top_px, thumb_h_px)) = scrollbar_thumb_geometry(total, buf.scroll_line, visible, editor_h) else {
@@ -589,14 +624,14 @@ fn editor_content_height(window_h: f32) -> f32 {
     (window_h - 84.0 - 32.0).max(0.0)
 }
 
-fn visible_lines(editor_content_h: f32) -> usize {
-    let line_h = 11.5f32 * 1.4f32;
+fn visible_lines(editor_content_h: f32, font_size: f32) -> usize {
+    let line_h = font_size * 1.4;
     (editor_content_h / line_h).floor().max(1.0) as usize
 }
 
 // Scroll so the cursor line is visible, given the editor's pixel height.
-fn scroll_to_cursor(session: &mut Session, editor_h: f32) {
-    let visible_lines = visible_lines(editor_h);
+fn scroll_to_cursor(session: &mut Session, editor_h: f32, font_size: f32) {
+    let visible_lines = visible_lines(editor_h, font_size);
     let buf = session.active_mut();
     let cursor_line = buf.cursor.line;
     if cursor_line < buf.scroll_line {
@@ -741,7 +776,7 @@ fn close_all_menus(doc: &mut Document) {
 
 pub fn build_demo_scene() -> (Node, Stylesheet) {
     use session::buffer::DiskStatus;
-    let sheet = build_stylesheet();
+    let sheet = build_stylesheet(11.5);
     let mut session = Session::open(":memory:").expect("in-memory session");
     session.active_mut().path = Some("demo.rs".into());
     session.active_mut().insert("// vomvom — custom rendering engine\n\nmod render;\n\nfn main() {\n    // build scene, run event loop\n    println!(\"hello world\");\n}");
@@ -883,17 +918,37 @@ fn hit_test_tab(root: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<usize> 
 }
 
 
+fn text_prefix_width(
+    canvas: &mut Canvas<OpenGl>,
+    mono_font: Option<FontId>,
+    mono_data: &'static [u8],
+    prefix: &str,
+    font_size: f32,
+) -> f32 {
+    if let Some(font_id) = mono_font {
+        let mut paint = Paint::color(femtovg::Color::black());
+        paint.set_font(&[font_id]);
+        paint.set_font_size(font_size);
+        canvas.measure_text(0.0, 0.0, prefix, &paint)
+            .map(|m| m.width())
+            .unwrap_or(0.0)
+    } else {
+        render::glyph_cache::measure_text_width(mono_data, prefix, font_size)
+    }
+}
+
 /// Paint cursor bars at the given (line, col, text) positions over the editor area.
 fn paint_cursors_with_text(
     canvas: &mut Canvas<OpenGl>,
     lb: &LayoutBox,
     cursors: &[(usize, usize, &str)], // (line_idx, col, line_text)
     mono_data: &'static [u8],
+    mono_font: Option<FontId>,
+    font_size: f32,
 ) {
     let Some(editor_lb) = lb.children.get(2) else { return };
 
     let cursor_color = femtovg::Color::rgbaf(0.9, 0.9, 1.0, 0.85);
-    let font_size = 11.5f32;
 
     for &(line_idx, col, line_text) in cursors {
         let Some(line_lb) = editor_lb.children.get(line_idx) else { continue };
@@ -901,7 +956,8 @@ fn paint_cursors_with_text(
         let line_top = line_lb.border_box.y;
 
         let prefix: String = line_text.chars().take(col).collect();
-        let x_off = render::glyph_cache::measure_text_width(mono_data, &prefix, font_size);
+        let x_off = text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
+        println!("cursor at {x_off}");
         let cursor_x = line_lb.content.x + x_off;
 
         let mut path = Path::new();
@@ -919,10 +975,10 @@ fn scrollbar_track_lb<'a>(lb: &'a LayoutBox, mx: f32, my: f32) -> Option<&'a Lay
 }
 
 /// Map a click at my inside the track to a scroll_line, centering the thumb on the click.
-fn scrollbar_y_to_scroll(track_lb: &LayoutBox, session: &Session, my: f32, window_h: f32) -> usize {
+fn scrollbar_y_to_scroll(track_lb: &LayoutBox, session: &Session, my: f32, window_h: f32, font_size: f32) -> usize {
     let buf = session.active();
     let total = buf.line_count();
-    let visible = visible_lines(editor_content_height(window_h));
+    let visible = visible_lines(editor_content_height(window_h), font_size);
     let track_h = track_lb.border_box.h;
     let max_scroll = total.saturating_sub(1) as f32;
     if max_scroll <= 0.0 { return 0; }
@@ -937,18 +993,20 @@ fn scrollbar_y_to_scroll(track_lb: &LayoutBox, session: &Session, my: f32, windo
 
 /// Hit-test a mouse click in the editor area; return (line, col).
 fn hit_test_editor(
+    canvas: &mut Canvas<OpenGl>,
     lb: &LayoutBox,
     session: &Session,
     mx: f32,
     my: f32,
     mono_data: &'static [u8],
+    mono_font: Option<FontId>,
+    font_size: f32,
 ) -> Option<(usize, usize)> {
     let editor_lb = lb.children.get(2)?;
     if !editor_lb.border_box.contains(mx, my) { return None; }
 
     let buf = session.active();
     let scroll = buf.scroll_line;
-    let font_size = 11.5f32;
 
     // Last child is the scrollbar track (absolutely positioned), not a text line.
     let line_count = editor_lb.children.len().saturating_sub(1);
@@ -972,7 +1030,7 @@ fn hit_test_editor(
 
     for col in 0..=chars.len() {
         let prefix: String = chars[..col].iter().collect();
-        let x = render::glyph_cache::measure_text_width(mono_data, &prefix, font_size);
+        let x = text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
         let dist = (x - local_x).abs();
         if dist < best_dist {
             best_dist = dist;

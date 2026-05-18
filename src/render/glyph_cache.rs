@@ -114,10 +114,21 @@ impl GlyphCache {
                 return None;
             }
             let (ax, ay) = self.alloc_shelf(w, h)?;
+            
             // Blit glyph bitmap into atlas as premultiplied RGBA (white × alpha).
+            
+            // Exponent bias to improve AA "pop" quality.
+            // Future: check: for dark-on-light users this might need to be 1.5 instead of 1.0/1.5.
+            let exp = 1.0/1.5;
+            
             for row in 0..h {
                 for col in 0..w {
                     let a = img.data[row * w + col];
+                    let mut a = a as f32;
+                    a = a / 255.0;
+                    a = a.powf(exp);
+                    a = a * 255.0;
+                    let a = a.round() as u8;
                     let base = ((ay + row) * ATLAS_SIZE + (ax + col)) * 4;
                     self.atlas_data[base]     = a;
                     self.atlas_data[base + 1] = a;
@@ -169,7 +180,6 @@ impl GlyphCache {
         let key = GlyphKey { font_index, glyph_id, size_px: size_px.round() as u16 };
         self.glyphs.get(&key).copied().flatten()
     }
-
 
     /// Upload dirty atlas data to GPU.
     pub fn flush(&mut self, canvas: &mut Canvas<OpenGl>) {
