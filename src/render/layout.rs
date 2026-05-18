@@ -226,8 +226,7 @@ fn layout_absolute_children(node: &Node, containing_w: f32, containing_h: f32, c
         if cs.position != Position::Absolute { continue; }
 
         let avail_w = resolve_length(cs.width, containing_w).unwrap_or(containing_w);
-        let avail_h = resolve_length(cs.height, containing_h).unwrap_or(containing_h);
-        let mut lb = layout(child, Constraints::new(avail_w, avail_h), measurer);
+        let mut lb = layout(child, Constraints::new(avail_w, containing_h), measurer);
 
         let x = resolve_length(cs.left, containing_w)
             .or_else(|| resolve_length(cs.right, containing_w).map(|r| containing_w - lb.border_box.w - r))

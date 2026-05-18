@@ -604,7 +604,7 @@ fn scrollbar_thumb_geometry(total: usize, scroll: usize, visible: usize, track_h
     Some((top, thumb_h))
 }
 
-fn update_scrollbar_styles(root: &mut Node, session: &Session, editor_h: f32, font_size: f32) {
+pub fn update_scrollbar_styles(root: &mut Node, session: &Session, editor_h: f32, font_size: f32) {
     let buf = session.active();
     let total = buf.line_count();
     let visible = visible_lines(editor_h, font_size);
@@ -617,10 +617,14 @@ fn update_scrollbar_styles(root: &mut Node, session: &Session, editor_h: f32, fo
     thumb.style.display = render::style::Display::Block;
     thumb.style.top = render::style::Length::Percent(top_px / editor_h * 100.0);
     thumb.style.height = render::style::Length::Percent(thumb_h_px / editor_h * 100.0);
+    if std::env::var("VOMVOM_DEBUG_SCROLLBAR").is_ok() {
+        eprintln!("[scrollbar] total={total} scroll={} visible={visible} editor_h={editor_h:.1} top_px={top_px:.1} thumb_h_px={thumb_h_px:.1} bottom_px={:.1} top%={:.2} h%={:.2}",
+            buf.scroll_line, top_px + thumb_h_px, top_px / editor_h * 100.0, thumb_h_px / editor_h * 100.0);
+    }
 }
 
 /// Height of the editor content area (inside padding) — equals the scrollbar track height.
-fn editor_content_height(window_h: f32) -> f32 {
+pub fn editor_content_height(window_h: f32) -> f32 {
     // toolbar 32 + tab-bar 28 + statusbar 24 = 84px fixed chrome; editor padding 16px top+bottom
     (window_h - 84.0 - 32.0).max(0.0)
 }
@@ -775,9 +779,10 @@ fn close_all_menus(doc: &mut Document) {
     doc.mark_dirty();
 }
 
-pub fn build_demo_scene() -> (Node, Stylesheet) {
+pub fn build_demo_scene() -> (Node, Stylesheet, Session) {
     use session::buffer::DiskStatus;
-    let sheet = build_stylesheet(11.5);
+    let font_size = 11.5_f32;
+    let sheet = build_stylesheet(font_size);
     let mut session = Session::open(":memory:").expect("in-memory session");
     session.active_mut().path = Some("demo.rs".into());
     session.active_mut().insert("// vomvom — custom rendering engine\n\nmod render;\n\nfn main() {\n    // build scene, run event loop\n    println!(\"hello world\");\n}");
@@ -800,8 +805,8 @@ pub fn build_demo_scene() -> (Node, Stylesheet) {
 
     let mut cache = std::collections::HashMap::new();
     rebuild_highlight_cache(&mut cache, &session);
-    let mut doc = Document::new(build_initial_document(&session, &cache));
-    (doc.root, sheet)
+    let doc = Document::new(build_initial_document(&session, &cache));
+    (doc.root, sheet, session)
 }
 
 fn main() {
