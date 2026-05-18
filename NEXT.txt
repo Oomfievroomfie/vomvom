@@ -1,0 +1,36 @@
+CURRENT STATE: mid-implementation of dropdown menus
+
+WHAT'S DONE:
+- position:absolute in layout engine (layout_absolute_children)
+- two-pass paint (paint_tree_root / paint_absolute_overlay) to render absolutes on top
+- menu headers (File, Edit) in toolbar, open_menu state on AppState
+- build_dropdown(), execute_menu_action(), hit_test_menu_header(), hit_test_menu_item()
+- stylesheet rules for .dropdown, .menu-header, .menu-item, .menu-separator
+
+WHAT'S BROKEN / NOT DONE:
+1. paint_tree_root not wired in yet — main.rs and screenshot.rs still call paint_tree
+   Fix: change both to paint_tree_root
+
+2. Screenshot demo forces open_menu=Some("file") for testing — revert to None after verifying
+
+3. Dropdown not visible yet (was being painted under editor due to paint order issue,
+   which paint_tree_root fixes)
+
+4. After fixing paint: verify dropdown renders correctly in screenshot
+
+5. hit_test_menu_item walks dropdown as last child of header node — verify indices match
+   tree structure after apply_styles (apply_styles mutates in-place, children preserved)
+
+6. Tab switching via click (hit_test_tab) — toolbar is now child 0 of root,
+   tab_bar is child 1 — check indices in hit_test_tab are still correct
+
+7. Tests may fail since layout_element changed (absolute children skip height contribution)
+   Run: cargo test
+
+IMMEDIATE NEXT STEPS:
+1. Replace paint_tree with paint_tree_root in main.rs:313 and screenshot.rs:104
+2. cargo build && cargo run -- --screenshot
+3. Check screenshot, iterate on positioning
+4. Revert demo open_menu to None
+5. cargo test to check layout tests still pass
+6. commit

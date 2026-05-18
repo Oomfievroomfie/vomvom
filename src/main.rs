@@ -23,10 +23,10 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use render::layout::{layout, finalize_positions, Constraints};
-use render::paint::{PaintContext, paint_tree};
+use render::layout::{layout, finalize_positions, Constraints, LayoutBox};
+use render::paint::{PaintContext, paint_tree_root};
 use render::style::{
-    AlignItems, Color, Display, Edges, FlexDirection, JustifyContent, Length, Selector,
+    AlignItems, Color, Display, Edges, FlexDirection, JustifyContent, Length, Position, Selector,
     Stylesheet, StyleDecl, Overflow,
 };
 use render::tree::{Node, apply_styles};
@@ -54,6 +54,9 @@ struct AppState {
     sheet: Stylesheet,
     session: Session,
     modifiers: Modifiers,
+    mouse_pos: (f32, f32),
+    last_layout: Option<(Node, LayoutBox)>,
+    open_menu: Option<String>,
 }
 
 impl App {
@@ -140,6 +143,9 @@ impl ApplicationHandler for App {
             sheet,
             session,
             modifiers: Modifiers::default(),
+            mouse_pos: (0.0, 0.0),
+            last_layout: None,
+            open_menu: None,
         });
     }
 
@@ -158,25 +164,46 @@ impl ApplicationHandler for App {
                 if event.state != ElementState::Pressed { return; }
                 use winit::keyboard::{Key, NamedKey};
                 let ctrl = state.modifiers.state().control_key();
-                let buf = state.session.active_mut();
+                let key = event.logical_key.clone();
                 let mut dirty = true;
-                match &event.logical_key {
-                    Key::Character(s) if ctrl && (s == "z" || s == "Z") => { buf.undo(); }
-                    Key::Character(s) if ctrl && (s == "y" || s == "Y") => { buf.redo(); }
+
+                // Handle commands that need full session access first.
+                match &key {
+                    Key::Character(s) if ctrl && (s == "o" || s == "O") => {
+                        open_file_dialog(&mut state.session);
+                        state.window.request_redraw();
+                        return;
+                    }
                     Key::Character(s) if ctrl && (s == "s" || s == "S") => {
                         let _ = state.session.save_active();
-                        dirty = false;
+                        state.window.request_redraw();
+                        return;
                     }
-                    // debug toggles
                     Key::Character(s) if ctrl && (s == "f" || s == "F") => {
                         state.use_femtovg = !state.use_femtovg;
-                        dirty = true;
+                        state.window.request_redraw();
+                        return;
                     }
                     Key::Character(s) if ctrl && (s == "h" || s == "H") => {
                         state.hint = !state.hint;
                         state.glyph_cache = GlyphCache::new();
-                        dirty = true;
+                        state.window.request_redraw();
+                        return;
                     }
+                    _ => {}
+                }
+
+                let buf = state.session.active_mut();
+                match &key {
+                    Key::Named(NamedKey::Escape) => {
+                        if state.open_menu.is_some() {
+                            state.open_menu = None;
+                            state.window.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Character(s) if ctrl && (s == "z" || s == "Z") => { buf.undo(); }
+                    Key::Character(s) if ctrl && (s == "y" || s == "Y") => { buf.redo(); }
                     Key::Named(NamedKey::Backspace) => { buf.backspace(); }
                     Key::Named(NamedKey::Delete) => { buf.delete_forward(); }
                     Key::Named(NamedKey::Enter) => { buf.insert("\n"); }
@@ -214,6 +241,38 @@ impl ApplicationHandler for App {
                 }
                 if dirty { state.window.request_redraw(); }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                state.mouse_pos = (position.x as f32, position.y as f32);
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: winit::event::MouseButton::Left, .. } => {
+                let (mx, my) = state.mouse_pos;
+                if let Some((ref scene, ref lb)) = state.last_layout.clone() {
+                    // Menu item click (dropdown open)?
+                    if state.open_menu.is_some() {
+                        if let Some(action) = hit_test_menu_item(scene, lb, mx, my) {
+                            state.open_menu = None;
+                            execute_menu_action(&action, &mut state.session);
+                            state.window.request_redraw();
+                            return;
+                        }
+                        // Click outside menu: close it.
+                        state.open_menu = None;
+                        state.window.request_redraw();
+                        return;
+                    }
+                    // Menu header click?
+                    if let Some(menu) = hit_test_menu_header(scene, lb, mx, my) {
+                        state.open_menu = Some(menu);
+                        state.window.request_redraw();
+                        return;
+                    }
+                    // Tab click?
+                    if let Some(idx) = hit_test_tab(scene, lb, mx, my) {
+                        state.session.set_active(idx);
+                        state.window.request_redraw();
+                    }
+                }
+            }
             WindowEvent::RedrawRequested => {
                 let _ = state.session.tick();
 
@@ -226,7 +285,7 @@ impl ApplicationHandler for App {
                 state.canvas.clear_rect(0, 0, size.width, size.height,
                     femtovg::Color::rgbf(0.15, 0.15, 0.18));
 
-                let mut scene = build_scene(&state.session, &state.sheet);
+                let mut scene = build_scene(&state.session, &state.sheet, state.open_menu.as_deref());
                 apply_styles(&mut scene, &state.sheet, &[], None);
                 let mut measurer = render::femtovg_measurer::SwashMeasurer {
                     sans_data: SANS_BYTES,
@@ -234,6 +293,7 @@ impl ApplicationHandler for App {
                 };
                 let mut lb = layout(&scene, Constraints::new(w, h), &mut measurer);
                 finalize_positions(&mut lb);
+                state.last_layout = Some((scene.clone(), lb.clone()));
 
                 if state.femtovg_fonts.is_none() {
                     let sans_id = state.canvas.add_font_mem(SANS_BYTES).expect("load sans");
@@ -250,7 +310,7 @@ impl ApplicationHandler for App {
                     use_femtovg: state.use_femtovg,
                     femtovg_fonts: state.femtovg_fonts,
                 };
-                paint_tree(&mut ctx, &scene, &lb);
+                paint_tree_root(&mut ctx, &scene, &lb);
 
                 state.canvas.flush();
                 state.gl_surface.swap_buffers(&state.gl_context).unwrap();
@@ -287,6 +347,45 @@ fn build_stylesheet() -> Stylesheet {
         StyleDecl::BackgroundColor(Color::rgb(0.15, 0.15, 0.18)),
     ]);
 
+    sheet.add(Selector::Class("toolbar".into()), vec![
+        StyleDecl::Display(Display::Flex),
+        StyleDecl::FlexDirection(FlexDirection::Row),
+        StyleDecl::AlignItems(AlignItems::Center),
+        StyleDecl::Height(Length::Px(32.0)),
+        StyleDecl::BackgroundColor(Color::rgb(0.2, 0.2, 0.25)),
+        StyleDecl::Padding(Edges { left: Length::Px(6.0), right: Length::Px(6.0), top: Length::Zero, bottom: Length::Zero }),
+        StyleDecl::Gap(6.0),
+    ]);
+
+    sheet.add(Selector::Class("btn".into()), vec![
+        StyleDecl::Display(Display::InlineBlock),
+        StyleDecl::BackgroundColor(Color::rgb(0.3, 0.3, 0.38)),
+        StyleDecl::Color(Color::rgb(0.9, 0.9, 0.9)),
+        StyleDecl::Padding(Edges { left: Length::Px(10.0), right: Length::Px(10.0), top: Length::Px(4.0), bottom: Length::Px(4.0) }),
+        StyleDecl::BorderRadius(3.0),
+        StyleDecl::FontSize(12.0),
+    ]);
+
+    sheet.add(Selector::Class("tab-bar".into()), vec![
+        StyleDecl::Display(Display::Flex),
+        StyleDecl::FlexDirection(FlexDirection::Row),
+        StyleDecl::Height(Length::Px(28.0)),
+        StyleDecl::BackgroundColor(Color::rgb(0.17, 0.17, 0.21)),
+    ]);
+
+    sheet.add(Selector::Class("tab".into()), vec![
+        StyleDecl::Display(Display::InlineBlock),
+        StyleDecl::Padding(Edges { left: Length::Px(14.0), right: Length::Px(14.0), top: Length::Px(6.0), bottom: Length::Px(6.0) }),
+        StyleDecl::Color(Color::rgb(0.65, 0.65, 0.75)),
+        StyleDecl::FontSize(12.0),
+        StyleDecl::BackgroundColor(Color::rgb(0.17, 0.17, 0.21)),
+    ]);
+
+    sheet.add(Selector::And(vec![Selector::Class("tab".into()), Selector::Class("active".into())]), vec![
+        StyleDecl::Color(Color::WHITE),
+        StyleDecl::BackgroundColor(Color::rgb(0.13, 0.13, 0.16)),
+    ]);
+
     sheet.add(Selector::Class("statusbar".into()), vec![
         StyleDecl::Display(Display::Flex),
         StyleDecl::FlexDirection(FlexDirection::Row),
@@ -319,26 +418,94 @@ fn build_stylesheet() -> Stylesheet {
         StyleDecl::BackgroundColor(Color::rgba(1.0, 1.0, 1.0, 0.05)),
     ]);
 
+    sheet.add(Selector::Class("menu-header".into()), vec![
+        StyleDecl::Display(Display::InlineBlock),
+        StyleDecl::Color(Color::rgb(0.85, 0.85, 0.85)),
+        StyleDecl::Padding(Edges { left: Length::Px(10.0), right: Length::Px(10.0), top: Length::Px(4.0), bottom: Length::Px(4.0) }),
+        StyleDecl::FontSize(13.0),
+    ]);
+
+    sheet.add(Selector::And(vec![Selector::Class("menu-header".into()), Selector::Class("open".into())]), vec![
+        StyleDecl::BackgroundColor(Color::rgb(0.3, 0.3, 0.5)),
+    ]);
+
+    sheet.add(Selector::Class("dropdown".into()), vec![
+        StyleDecl::Position(Position::Absolute),
+        StyleDecl::Top(Length::Percent(100.0)),
+        StyleDecl::Left(Length::Zero),
+        StyleDecl::BackgroundColor(Color::rgb(0.22, 0.22, 0.28)),
+        StyleDecl::BorderWidth(1.0),
+        StyleDecl::BorderColor(Color::rgb(0.4, 0.4, 0.5)),
+        StyleDecl::ZIndex(100),
+        StyleDecl::MinWidth(Length::Px(180.0)),
+    ]);
+
+    sheet.add(Selector::Class("menu-item".into()), vec![
+        StyleDecl::Display(Display::Block),
+        StyleDecl::Color(Color::rgb(0.9, 0.9, 0.9)),
+        StyleDecl::Padding(Edges { left: Length::Px(16.0), right: Length::Px(16.0), top: Length::Px(6.0), bottom: Length::Px(6.0) }),
+        StyleDecl::FontSize(13.0),
+    ]);
+
+    sheet.add(Selector::Class("menu-separator".into()), vec![
+        StyleDecl::Display(Display::Block),
+        StyleDecl::Height(Length::Px(1.0)),
+        StyleDecl::BackgroundColor(Color::rgb(0.35, 0.35, 0.45)),
+        StyleDecl::Margin(Edges { top: Length::Px(3.0), bottom: Length::Px(3.0), left: Length::Zero, right: Length::Zero }),
+    ]);
+
     sheet
 }
 
-fn build_scene(session: &Session, _sheet: &Stylesheet) -> Node {
+fn build_scene(session: &Session, _sheet: &Stylesheet, open_menu: Option<&str>) -> Node {
     let buf = session.active();
     let cursor = buf.cursor;
-
     let line_count = buf.line_count();
+
     let path_label = buf.path.as_deref().unwrap_or("[untitled]");
     let modified_marker = if buf.is_modified { " ●" } else { "" };
     let status_left = format!("{}{}", path_label, modified_marker);
     let status_right = format!("Ln {}, Col {}  UTF-8", cursor.line + 1, cursor.col + 1);
 
+    // Menu headers — clicking opens their dropdown.
+    let menus = [("File", "file"), ("Edit", "edit")];
+    let mut toolbar = Node::element("div").with_class("toolbar");
+    for (label, id) in &menus {
+        let mut header = Node::element("div")
+            .with_class("menu-header")
+            .with_attr("menu", *id);
+        if open_menu == Some(id) { header = header.with_class("open"); }
+        header = header.with_child(Node::text(*label));
+
+        // Attach dropdown as absolutely-positioned child of the header.
+        if open_menu == Some(id) {
+            let dropdown = build_dropdown(id);
+            header = header.with_child(dropdown);
+        }
+        toolbar = toolbar.with_child(header);
+    }
+
+    // Tab bar: one tab per buffer
+    let mut tab_bar = Node::element("div").with_class("tab-bar");
+    for (i, b) in session.buffers.iter().enumerate() {
+        let label = b.path.as_deref()
+            .and_then(|p| std::path::Path::new(p).file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("[untitled]")
+            .to_string();
+        let modified = if b.is_modified { " ●" } else { "" };
+        let mut tab = Node::element("div").with_class("tab");
+        if i == session.active_idx { tab = tab.with_class("active"); }
+        tab = tab.with_attr("tab-idx", &i.to_string())
+            .with_child(Node::text(format!("{}{}", label, modified)));
+        tab_bar = tab_bar.with_child(tab);
+    }
+
     let mut editor = Node::element("div").with_class("editor");
     for i in 0..line_count {
         let text = buf.line(i).to_string();
         let mut line_node = Node::element("div").with_class("line");
-        if i == cursor.line {
-            line_node = line_node.with_class("cursor-line");
-        }
+        if i == cursor.line { line_node = line_node.with_class("cursor-line"); }
         line_node = line_node.with_child(Node::text(if text.is_empty() { " ".into() } else { text }));
         editor = editor.with_child(line_node);
     }
@@ -349,15 +516,17 @@ fn build_scene(session: &Session, _sheet: &Stylesheet) -> Node {
         .with_child(Node::text(status_right));
 
     Node::element("root")
+        .with_child(toolbar)
+        .with_child(tab_bar)
         .with_child(editor)
         .with_child(statusbar)
 }
 
 pub fn build_demo_scene() -> (Node, Stylesheet) {
     let sheet = build_stylesheet();
-    // Build a static demo using a temporary session so screenshot still works.
-    let session = Session::open(":memory:").expect("in-memory session");
-    let scene = build_scene(&session, &sheet);
+    let mut session = Session::open(":memory:").expect("in-memory session");
+    session.active_mut().insert("// vomvom — custom rendering engine\n\nmod render;\n\nfn main() {\n    // build scene, run event loop\n    println!(\"hello world\");\n}");
+    let scene = build_scene(&session, &sheet, Some("file"));
     (scene, sheet)
 }
 
@@ -383,6 +552,142 @@ fn main() {
     let event_loop = EventLoop::new().unwrap();
     let mut app = App::new(db_path, args);
     event_loop.run_app(&mut app).unwrap();
+}
+
+fn build_dropdown(menu_id: &str) -> Node {
+    fn item(label: &str, action: &str) -> Node {
+        Node::element("div").with_class("menu-item").with_attr("action", action)
+            .with_child(Node::text(label))
+    }
+    fn sep() -> Node {
+        Node::element("div").with_class("menu-separator")
+    }
+
+    let mut dropdown = Node::element("div").with_class("dropdown");
+
+    match menu_id {
+        "file" => {
+            dropdown = dropdown
+                .with_child(item("Open...    Ctrl+O", "open"))
+                .with_child(item("Save       Ctrl+S", "save"))
+                .with_child(sep())
+                .with_child(item("Close Tab", "close-tab"));
+        }
+        "edit" => {
+            dropdown = dropdown
+                .with_child(item("Undo       Ctrl+Z", "undo"))
+                .with_child(item("Redo       Ctrl+Y", "redo"));
+        }
+        _ => {}
+    }
+    dropdown
+}
+
+fn execute_menu_action(action: &str, session: &mut Session) {
+    match action {
+        "open" => open_file_dialog(session),
+        "save" => { let _ = session.save_active(); }
+        "undo" => { session.active_mut().undo(); }
+        "redo" => { session.active_mut().redo(); }
+        "close-tab" => { /* TODO */ }
+        _ => {}
+    }
+}
+
+// Walk toolbar menu headers (children of toolbar = root child 0).
+fn hit_test_menu_header(scene: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<String> {
+    use render::tree::NodeContent;
+    let toolbar_lb = lb.children.first()?;
+    let toolbar_node = scene.children().first()?;
+    for (i, child_lb) in toolbar_lb.children.iter().enumerate() {
+        let r = child_lb.border_box;
+        if r.contains(mx, my) {
+            let child_node = &toolbar_node.children()[i];
+            if let NodeContent::Element { attrs, .. } = &child_node.content {
+                if let Some(menu) = attrs.get("menu") {
+                    return Some(menu.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+// Walk dropdown menu items. Dropdown is a child of the open menu header.
+fn hit_test_menu_item(scene: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<String> {
+    use render::tree::NodeContent;
+    let toolbar_lb = lb.children.first()?;
+    let toolbar_node = scene.children().first()?;
+    // Find the open menu header (the one with a dropdown child).
+    for (i, header_lb) in toolbar_lb.children.iter().enumerate() {
+        let header_node = &toolbar_node.children()[i];
+        // The dropdown is the last child if present.
+        let dropdown_node = header_node.children().last()?;
+        if let NodeContent::Element { classes, .. } = &dropdown_node.content {
+            if !classes.contains(&"dropdown".to_string()) { continue; }
+        } else { continue; }
+        let dropdown_lb = header_lb.children.last()?;
+        for (j, item_lb) in dropdown_lb.children.iter().enumerate() {
+            if item_lb.border_box.contains(mx, my) {
+                let item_node = &dropdown_node.children()[j];
+                if let NodeContent::Element { attrs, .. } = &item_node.content {
+                    if let Some(action) = attrs.get("action") {
+                        return Some(action.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn open_file_dialog(session: &mut Session) {
+    if let Some(path) = rfd::FileDialog::new().pick_file() {
+        if let Some(path_str) = path.to_str() {
+            let idx = session.open_file(path_str).unwrap_or(0);
+            session.set_active(idx);
+        }
+    }
+}
+
+fn hit_test_toolbar(scene: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<String> {
+    use render::tree::NodeContent;
+    // Walk toolbar children (first child of root = toolbar, its children = buttons)
+    let toolbar_lb = lb.children.first()?;
+    let root_children = scene.children();
+    let toolbar_node = root_children.first()?;
+    for (i, btn_lb) in toolbar_lb.children.iter().enumerate() {
+        let r = btn_lb.border_box;
+        if mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h {
+            let btn_node = &toolbar_node.children()[i];
+            if let NodeContent::Element { attrs, .. } = &btn_node.content {
+                if let Some(action) = attrs.get("action") {
+                    return Some(action.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn hit_test_tab(scene: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<usize> {
+    use render::tree::NodeContent;
+    // Tab bar is second child of root
+    let tab_bar_lb = lb.children.get(1)?;
+    let root_children = scene.children();
+    let tab_bar_node = root_children.get(1)?;
+    for (i, tab_lb) in tab_bar_lb.children.iter().enumerate() {
+        let r = tab_lb.border_box;
+        if mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h {
+            let tab_node = &tab_bar_node.children()[i];
+            if let NodeContent::Element { attrs, .. } = &tab_node.content {
+                if let Some(idx_str) = attrs.get("tab-idx") {
+                    return idx_str.parse().ok();
+                }
+            }
+        }
+    }
+    None
 }
 
 fn dirs_or_local() -> std::path::PathBuf {

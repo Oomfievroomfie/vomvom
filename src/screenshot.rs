@@ -21,7 +21,7 @@ use winit::{
 };
 
 use crate::render::layout::{layout, finalize_positions, Constraints};
-use crate::render::paint::{PaintContext, paint_tree};
+use crate::render::paint::{PaintContext, paint_tree_root};
 use crate::render::tree::apply_styles;
 use crate::render::glyph_cache::GlyphCache;
 use crate::{build_demo_scene, SANS_BYTES, MONO_BYTES};
@@ -101,7 +101,7 @@ pub fn save_screenshot(path: &Path, width: u32, height: u32) {
         use_femtovg: false,
         femtovg_fonts: None,
     };
-    paint_tree(&mut ctx, &scene, &lb);
+    paint_tree_root(&mut ctx, &scene, &lb);
     ctx.canvas.flush();
 
     let img = ctx.canvas.screenshot().expect("screenshot failed");

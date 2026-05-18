@@ -6,7 +6,7 @@
 //   finalize_positions() does a single post-pass to convert everything to
 //   absolute screen coords by recursively adding parent content origins.
 
-use crate::render::style::{Display, FlexDirection, AlignItems, JustifyContent, Length};
+use crate::render::style::{Display, FlexDirection, AlignItems, JustifyContent, Length, Position};
 use crate::render::tree::{Node, NodeContent};
 
 pub trait TextMeasurer {
@@ -142,19 +142,36 @@ fn layout_element(node: &Node, constraints: Constraints, measurer: &mut dyn Text
     let content_constraints = Constraints::new(child_w, constraints.available_h - chrome_y);
 
     // Children are laid out in local space relative to this node's content rect.
-    let children = match s.display {
-        Display::Flex => layout_flex(node, content_constraints, s.flex_direction, s.align_items, s.justify_content, s.gap, measurer),
+    // Absolute children get placeholder slots; layout_absolute_children fills them in.
+    let mut children = match s.display {
+        Display::Flex => {
+            let in_flow = layout_flex(node, content_constraints, s.flex_direction, s.align_items, s.justify_content, s.gap, measurer);
+            // Re-merge: insert placeholder slots for absolute children at their original indices.
+            let mut result = Vec::with_capacity(node.children().len());
+            let mut in_flow_iter = in_flow.into_iter();
+            for child in node.children() {
+                if child.style.position == Position::Absolute {
+                    result.push(LayoutBox::leaf(Rect::default(), Rect::default()));
+                } else {
+                    result.push(in_flow_iter.next().unwrap_or_else(|| LayoutBox::leaf(Rect::default(), Rect::default())));
+                }
+            }
+            result
+        }
         _ => layout_block_children(node, content_constraints, measurer),
     };
 
-    // Height: explicit or shrink-wrap children.
+    // Height: explicit or shrink-wrap in-flow children (absolute children don't contribute).
     let inner_h = resolve_length(s.height, constraints.available_h)
         .unwrap_or_else(|| {
-            children.iter().fold(0.0f32, |acc, cb| {
-                (cb.border_box.y + cb.border_box.h).max(acc)
-            })
+            node.children().iter().zip(children.iter())
+                .filter(|(n, _)| n.style.position != Position::Absolute)
+                .fold(0.0f32, |acc, (_, cb)| (cb.border_box.y + cb.border_box.h).max(acc))
         });
     let inner_h = clamp_size(inner_h, s.min_height, s.max_height, constraints.available_h);
+
+    // Lay out absolutely positioned children — containing block is the full border-box of this element.
+    layout_absolute_children(node, inner_w + chrome_x, inner_h + chrome_y, &mut children, measurer);
 
     // For shrink-wrap elements, width comes from children extents.
     let inner_w = if shrink_wrap {
@@ -182,11 +199,13 @@ fn layout_block_children(node: &Node, constraints: Constraints, measurer: &mut d
 
     for child in node.children() {
         let cs = &child.style;
-        let mt = cs.margin.top.resolve(constraints.available_h);
+        if cs.position == Position::Absolute {
+            result.push(LayoutBox::leaf(Rect::default(), Rect::default())); // placeholder
+            continue;
+        }
         let mb = cs.margin.bottom.resolve(constraints.available_h);
 
         let mut lb = layout(child, constraints, measurer);
-        // border_box.y already includes mt; just add cursor.
         lb.border_box.y += cursor_y;
         lb.content.y += cursor_y;
         cursor_y = lb.border_box.y + lb.border_box.h + mb;
@@ -194,6 +213,38 @@ fn layout_block_children(node: &Node, constraints: Constraints, measurer: &mut d
     }
 
     result
+}
+
+fn layout_absolute_children(node: &Node, containing_w: f32, containing_h: f32, children_lbs: &mut Vec<LayoutBox>, measurer: &mut dyn TextMeasurer) {
+    for (i, child) in node.children().iter().enumerate() {
+        let cs = &child.style;
+        if cs.position != Position::Absolute { continue; }
+
+        let avail_w = resolve_length(cs.width, containing_w).unwrap_or(containing_w);
+        let avail_h = resolve_length(cs.height, containing_h).unwrap_or(containing_h);
+        let mut lb = layout(child, Constraints::new(avail_w, avail_h), measurer);
+
+        let x = resolve_length(cs.left, containing_w)
+            .or_else(|| resolve_length(cs.right, containing_w).map(|r| containing_w - lb.border_box.w - r))
+            .unwrap_or(0.0);
+        let y = resolve_length(cs.top, containing_h)
+            .or_else(|| resolve_length(cs.bottom, containing_h).map(|b| containing_h - lb.border_box.h - b))
+            .unwrap_or(0.0);
+
+        lb.border_box.x = x;
+        lb.border_box.y = y;
+        lb.content.x = x + (lb.content.x - lb.border_box.x.min(lb.content.x));
+        lb.content.y = y + (lb.content.y - lb.border_box.y.min(lb.content.y));
+
+        // Recalculate content offset from border_box properly.
+        let bw = cs.border.width;
+        let pl = cs.padding.left.resolve(containing_w);
+        let pt = cs.padding.top.resolve(containing_h);
+        lb.content.x = x + pl + bw;
+        lb.content.y = y + pt + bw;
+
+        children_lbs[i] = lb;
+    }
 }
 
 fn layout_flex(
@@ -205,7 +256,10 @@ fn layout_flex(
     gap: f32,
     measurer: &mut dyn TextMeasurer,
 ) -> Vec<LayoutBox> {
-    let children: Vec<&Node> = node.children().iter().collect();
+    // Absolute children are laid out separately by layout_element; skip them here.
+    let children: Vec<&Node> = node.children().iter()
+        .filter(|c| c.style.position != Position::Absolute)
+        .collect();
     if children.is_empty() {
         return vec![];
     }

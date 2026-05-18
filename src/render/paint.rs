@@ -87,6 +87,25 @@ impl<'a> PaintContext<'a> {
     }
 }
 
+/// Paint the full tree: normal pass then overlay pass for absolutely-positioned nodes.
+pub fn paint_tree_root(ctx: &mut PaintContext, node: &Node, lb: &LayoutBox) {
+    paint_tree(ctx, node, lb);
+    // Collect and paint absolute nodes on top (global stacking context).
+    paint_absolute_overlay(ctx, node, lb);
+}
+
+fn paint_absolute_overlay(ctx: &mut PaintContext, node: &Node, lb: &LayoutBox) {
+    use crate::render::style::Position;
+    for (i, child_node) in node.children().iter().enumerate() {
+        let child_lb = &lb.children[i];
+        if child_node.style.position == Position::Absolute {
+            paint_tree(ctx, child_node, child_lb);
+        } else {
+            paint_absolute_overlay(ctx, child_node, child_lb);
+        }
+    }
+}
+
 pub fn paint_tree(ctx: &mut PaintContext, node: &Node, lb: &LayoutBox) {
     if node.style.display == Display::None {
         return;
@@ -152,8 +171,11 @@ pub fn paint_tree(ctx: &mut PaintContext, node: &Node, lb: &LayoutBox) {
         }
     }
 
-    // Children (sorted by z-index)
-    let mut order: Vec<usize> = (0..lb.children.len()).collect();
+    // Children (sorted by z-index), skipping absolutely-positioned ones (painted in overlay pass).
+    use crate::render::style::Position;
+    let mut order: Vec<usize> = (0..lb.children.len())
+        .filter(|&i| node.children()[i].style.position != Position::Absolute)
+        .collect();
     order.sort_by_key(|&i| lb.children[i].z_index);
 
     for i in order {

@@ -6,6 +6,7 @@ default-run = "vomvom"
 
 [dependencies]
 rusqlite = { version = "0.37.0", features = ["bundled"] }
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 winit = "0.30.13"
 femtovg = { version = "0.25", features = ["swash"] }
 glutin = "0.32"
