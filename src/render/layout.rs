@@ -173,11 +173,11 @@ fn layout_element(node: &Node, constraints: Constraints, measurer: &mut dyn Text
     // Lay out absolutely positioned children — containing block is the full border-box of this element.
     layout_absolute_children(node, inner_w + chrome_x, inner_h + chrome_y, &mut children, measurer);
 
-    // For shrink-wrap elements, width comes from children extents.
+    // For shrink-wrap elements, width comes from in-flow children extents only.
     let inner_w = if shrink_wrap {
-        let children_w = children.iter().fold(0.0f32, |acc, cb| {
-            (cb.border_box.x + cb.border_box.w).max(acc)
-        });
+        let children_w = node.children().iter().zip(children.iter())
+            .filter(|(n, _)| n.style.position != Position::Absolute)
+            .fold(0.0f32, |acc, (_, cb)| (cb.border_box.x + cb.border_box.w).max(acc));
         clamp_size(children_w, s.min_width, s.max_width, constraints.available_w)
     } else {
         inner_w
