@@ -226,34 +226,41 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::Backspace) => { buf.backspace(); }
                     Key::Named(NamedKey::Delete) => { buf.delete_forward(); }
                     Key::Named(NamedKey::Enter) => { buf.insert("\n"); }
+                    Key::Named(NamedKey::Space) => { buf.insert(" "); }
                     Key::Named(NamedKey::Tab) => { buf.insert("    "); }
                     Key::Named(NamedKey::ArrowLeft) => {
                         let pos = buf.cursor;
                         let (l, c) = if pos.col > 0 { (pos.line, pos.col - 1) } else if pos.line > 0 { (pos.line - 1, buf.line(pos.line - 1).chars().count()) } else { (0, 0) };
                         buf.move_cursor(l, c);
+                        buf.break_undo_group();
                     }
                     Key::Named(NamedKey::ArrowRight) => {
                         let pos = buf.cursor;
                         let line_len = buf.line(pos.line).chars().count();
                         let (l, c) = if pos.col < line_len { (pos.line, pos.col + 1) } else if pos.line + 1 < buf.line_count() { (pos.line + 1, 0) } else { (pos.line, pos.col) };
                         buf.move_cursor(l, c);
+                        buf.break_undo_group();
                     }
                     Key::Named(NamedKey::ArrowUp) => {
                         let pos = buf.cursor;
                         if pos.line > 0 { buf.move_cursor(pos.line - 1, pos.col); }
+                        buf.break_undo_group();
                     }
                     Key::Named(NamedKey::ArrowDown) => {
                         let pos = buf.cursor;
                         if pos.line + 1 < buf.line_count() { buf.move_cursor(pos.line + 1, pos.col); }
+                        buf.break_undo_group();
                     }
                     Key::Named(NamedKey::Home) => {
                         let line = buf.cursor.line;
                         buf.move_cursor(line, 0);
+                        buf.break_undo_group();
                     }
                     Key::Named(NamedKey::End) => {
                         let line = buf.cursor.line;
                         let len = buf.line(line).chars().count();
                         buf.move_cursor(line, len);
+                        buf.break_undo_group();
                     }
                     Key::Character(s) if !ctrl => { buf.insert(s); }
                     _ => { dirty = false; }
@@ -329,7 +336,9 @@ impl ApplicationHandler for App {
                         state.needs_redraw = true;
                     // Editor click — place cursor.
                     } else if let Some((line, col)) = hit_test_editor(lb, &state.session, mx, my, MONO_BYTES) {
-                        state.session.active_mut().move_cursor(line, col);
+                        let buf = state.session.active_mut();
+                        buf.move_cursor(line, col);
+                        buf.break_undo_group();
                         scroll_to_cursor(&mut state.session, editor_content_height(win_h));
                         update_editor(&mut state.doc, &state.session);
                         update_statusbar(&mut state.doc, &state.session);

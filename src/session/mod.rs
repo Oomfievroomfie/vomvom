@@ -177,6 +177,7 @@ mod tests {
         {
             let mut session = Session::open(&path).unwrap();
             session.active_mut().insert("abc");
+            session.active_mut().break_undo_group();
             session.active_mut().insert("def");
             session.active_mut().undo();
             session.sync_now().unwrap();

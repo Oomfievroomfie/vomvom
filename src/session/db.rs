@@ -8,7 +8,7 @@
 
 use rusqlite::{Connection, params};
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -44,6 +44,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                 line_end    INTEGER NOT NULL,
                 col_end     INTEGER NOT NULL,
                 text        TEXT NOT NULL,
+                group_id    INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(buffer_id, seq)
             );
 
@@ -65,6 +66,14 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
             PRAGMA user_version = 1;
         ")?;
+    }
+    if version < 2 {
+        // Add group_id if it doesn't exist yet (schema created fresh with v1 already has it).
+        let col_exists = conn.prepare("SELECT group_id FROM undo_ops LIMIT 0").is_ok();
+        if !col_exists {
+            conn.execute_batch("ALTER TABLE undo_ops ADD COLUMN group_id INTEGER NOT NULL DEFAULT 0;")?;
+        }
+        conn.execute_batch("PRAGMA user_version = 2;")?;
     }
     Ok(())
 }
@@ -138,11 +147,12 @@ pub struct UndoOp {
     pub line_end: i64,
     pub col_end: i64,
     pub text: String,
+    pub group_id: i64,
 }
 
 pub fn load_undo_ops(conn: &Connection, buffer_id: i64) -> rusqlite::Result<Vec<UndoOp>> {
     let mut stmt = conn.prepare(
-        "SELECT seq, kind, line_start, col_start, line_end, col_end, text
+        "SELECT seq, kind, line_start, col_start, line_end, col_end, text, group_id
          FROM undo_ops WHERE buffer_id=?1 ORDER BY seq"
     )?;
     let rows = stmt.query_map(params![buffer_id], |r| {
@@ -155,6 +165,7 @@ pub fn load_undo_ops(conn: &Connection, buffer_id: i64) -> rusqlite::Result<Vec<
             line_end: r.get(4)?,
             col_end: r.get(5)?,
             text: r.get(6)?,
+            group_id: r.get(7)?,
         })
     })?;
     rows.collect()
@@ -181,8 +192,8 @@ pub fn sync_undo_ops(
     conn.execute("DELETE FROM undo_state WHERE buffer_id=?1", params![buffer_id])?;
 
     let mut stmt = conn.prepare(
-        "INSERT INTO undo_ops (buffer_id, seq, kind, line_start, col_start, line_end, col_end, text)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+        "INSERT INTO undo_ops (buffer_id, seq, kind, line_start, col_start, line_end, col_end, text, group_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
     )?;
     for op in ops {
         stmt.execute(params![
@@ -191,6 +202,7 @@ pub fn sync_undo_ops(
             if op.kind == OpKind::Insert { "insert" } else { "delete" },
             op.line_start, op.col_start, op.line_end, op.col_end,
             op.text,
+            op.group_id,
         ])?;
     }
 
@@ -286,7 +298,7 @@ mod tests {
         let ops = vec![UndoOp {
             seq: 0, kind: OpKind::Insert,
             line_start: 0, col_start: 0, line_end: 0, col_end: 1,
-            text: "x".into(),
+            text: "x".into(), group_id: 0,
         }];
         sync_undo_ops(&conn, id, &ops, 0).unwrap();
         delete_buffer(&conn, id).unwrap();
@@ -302,8 +314,8 @@ mod tests {
         let conn = mem_db();
         let id = insert_buffer(&conn, None, "abc").unwrap();
         let ops = vec![
-            UndoOp { seq: 0, kind: OpKind::Insert, line_start: 0, col_start: 0, line_end: 0, col_end: 3, text: "abc".into() },
-            UndoOp { seq: 1, kind: OpKind::Delete, line_start: 0, col_start: 1, line_end: 0, col_end: 2, text: "b".into() },
+            UndoOp { seq: 0, kind: OpKind::Insert, line_start: 0, col_start: 0, line_end: 0, col_end: 3, text: "abc".into(), group_id: 0 },
+            UndoOp { seq: 1, kind: OpKind::Delete, line_start: 0, col_start: 1, line_end: 0, col_end: 2, text: "b".into(), group_id: 1 },
         ];
         sync_undo_ops(&conn, id, &ops, 1).unwrap();
         let loaded = load_undo_ops(&conn, id).unwrap();
@@ -321,13 +333,13 @@ mod tests {
         let conn = mem_db();
         let id = insert_buffer(&conn, None, "").unwrap();
         let ops1 = vec![
-            UndoOp { seq: 0, kind: OpKind::Insert, line_start: 0, col_start: 0, line_end: 0, col_end: 1, text: "a".into() },
-            UndoOp { seq: 1, kind: OpKind::Insert, line_start: 0, col_start: 1, line_end: 0, col_end: 2, text: "b".into() },
+            UndoOp { seq: 0, kind: OpKind::Insert, line_start: 0, col_start: 0, line_end: 0, col_end: 1, text: "a".into(), group_id: 0 },
+            UndoOp { seq: 1, kind: OpKind::Insert, line_start: 0, col_start: 1, line_end: 0, col_end: 2, text: "b".into(), group_id: 1 },
         ];
         sync_undo_ops(&conn, id, &ops1, 1).unwrap();
         // Now undo once and resync with only op[0]
         let ops2 = vec![
-            UndoOp { seq: 0, kind: OpKind::Insert, line_start: 0, col_start: 0, line_end: 0, col_end: 1, text: "a".into() },
+            UndoOp { seq: 0, kind: OpKind::Insert, line_start: 0, col_start: 0, line_end: 0, col_end: 1, text: "a".into(), group_id: 0 },
         ];
         sync_undo_ops(&conn, id, &ops2, 0).unwrap();
         let loaded = load_undo_ops(&conn, id).unwrap();

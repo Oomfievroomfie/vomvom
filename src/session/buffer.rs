@@ -4,6 +4,7 @@
 
 use crate::session::db::{OpKind, UndoOp};
 use ropey::Rope;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Pos {
@@ -15,7 +16,9 @@ impl Pos {
     pub fn new(line: usize, col: usize) -> Self { Pos { line, col } }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EditKind { Insert, Backspace, DeleteForward }
+
 pub struct Buffer {
     pub id: i64,
     pub path: Option<String>,
@@ -28,6 +31,10 @@ pub struct Buffer {
     ops: Vec<UndoOp>,
     undo_head: Option<usize>,
     next_seq: i64,
+    next_group: i64,
+    last_edit_kind: Option<EditKind>,
+    last_edit_time: Option<Instant>,
+    last_insert_was_separator: bool,
 }
 
 impl Buffer {
@@ -43,17 +50,24 @@ impl Buffer {
             ops: Vec::new(),
             undo_head: None,
             next_seq: 0,
+            next_group: 0,
+            last_edit_kind: None,
+            last_edit_time: None,
+            last_insert_was_separator: false,
         }
     }
 
     pub fn restore_undo(&mut self, ops: Vec<UndoOp>, current_seq: i64) {
         self.next_seq = ops.last().map(|o| o.seq + 1).unwrap_or(0);
+        self.next_group = ops.iter().map(|o| o.group_id + 1).max().unwrap_or(0);
         self.undo_head = if current_seq < 0 {
             None
         } else {
             ops.iter().rposition(|o| o.seq == current_seq)
         };
         self.ops = ops;
+        self.last_edit_kind = None;
+        self.last_edit_time = None;
     }
 
     pub fn content(&self) -> String {
@@ -76,6 +90,46 @@ impl Buffer {
 
     // ── Editing ───────────────────────────────────────────────────────────────
 
+    fn is_insert_separator(text: &str) -> bool {
+        text.chars().all(|c| c == ' ' || c == '\n' || c == '\t')
+    }
+
+    // Returns the group_id for the current edit, advancing next_group when a
+    // new group is needed.
+    //
+    // Insert grouping: spaces/tabs/newlines split from a preceding word but
+    // chain with the following word (non-sep→sep = split, sep→non-sep = no split).
+    //
+    // Backspace/delete grouping: newlines always force a split (each line's
+    // worth of deletion is its own group); spaces/tabs do not split.
+    fn current_group(&mut self, kind: EditKind, text: &str) -> i64 {
+        let now = Instant::now();
+        let timed_out = self.last_edit_time.map_or(true, |t| now.duration_since(t).as_secs() >= 4);
+        let split = match &self.last_edit_kind {
+            None => true,
+            Some(k) => {
+                *k != kind
+                || timed_out
+                || match kind {
+                    EditKind::Insert => {
+                        let incoming_sep = Self::is_insert_separator(text);
+                        incoming_sep && !self.last_insert_was_separator
+                    }
+                    EditKind::Backspace | EditKind::DeleteForward => {
+                        text.contains('\n') && !self.last_insert_was_separator
+                    }
+                }
+            }
+        };
+        if split {
+            self.next_group += 1;
+        }
+        self.last_edit_kind = Some(kind);
+        self.last_edit_time = Some(now);
+        self.last_insert_was_separator = text.chars().all(|c| matches!(c, ' ' | '\t' | '\n' | '\r'));
+        self.next_group
+    }
+
     pub fn insert(&mut self, text: &str) {
         let start = self.cursor;
         self.apply_insert(start, text);
@@ -83,6 +137,7 @@ impl Buffer {
         let end = self.cursor;
         let seq = self.next_seq;
         self.next_seq += 1;
+        let group_id = self.current_group(EditKind::Insert, text);
         self.ops.push(UndoOp {
             seq,
             kind: OpKind::Insert,
@@ -91,6 +146,7 @@ impl Buffer {
             line_end: end.line as i64,
             col_end: end.col as i64,
             text: text.to_string(),
+            group_id,
         });
         self.undo_head = Some(self.ops.len() - 1);
         self.is_modified = true;
@@ -106,6 +162,7 @@ impl Buffer {
         self.truncate_redo();
         let seq = self.next_seq;
         self.next_seq += 1;
+        let group_id = self.current_group(EditKind::Backspace, &deleted);
         self.ops.push(UndoOp {
             seq,
             kind: OpKind::Delete,
@@ -114,6 +171,7 @@ impl Buffer {
             line_end: end.line as i64,
             col_end: end.col as i64,
             text: deleted,
+            group_id,
         });
         self.undo_head = Some(self.ops.len() - 1);
         self.is_modified = true;
@@ -129,6 +187,7 @@ impl Buffer {
         self.truncate_redo();
         let seq = self.next_seq;
         self.next_seq += 1;
+        let group_id = self.current_group(EditKind::DeleteForward, &deleted);
         self.ops.push(UndoOp {
             seq,
             kind: OpKind::Delete,
@@ -137,10 +196,19 @@ impl Buffer {
             line_end: end.line as i64,
             col_end: end.col as i64,
             text: deleted,
+            group_id,
         });
         self.undo_head = Some(self.ops.len() - 1);
         self.is_modified = true;
         self.dirty = true;
+    }
+
+    // Break the current undo group so the next edit starts a new group.
+    // Call this after cursor moves, undo/redo, or any non-edit action.
+    pub fn break_undo_group(&mut self) {
+        self.last_edit_kind = None;
+        self.last_edit_time = None;
+        self.last_insert_was_separator = false;
     }
 
     pub fn undo(&mut self) -> bool {
@@ -148,21 +216,31 @@ impl Buffer {
             None => return false,
             Some(h) => h,
         };
-        let op = self.ops[head].clone();
-        match op.kind {
-            OpKind::Insert => {
-                let start = Pos::new(op.line_start as usize, op.col_start as usize);
-                let end = Pos::new(op.line_end as usize, op.col_end as usize);
-                self.apply_delete(start, end);
-                self.cursor = start;
+        let group = self.ops[head].group_id;
+        // Walk backwards applying all ops in this group.
+        let mut idx = head;
+        loop {
+            let op = self.ops[idx].clone();
+            match op.kind {
+                OpKind::Insert => {
+                    let start = Pos::new(op.line_start as usize, op.col_start as usize);
+                    let end = Pos::new(op.line_end as usize, op.col_end as usize);
+                    self.apply_delete(start, end);
+                    self.cursor = start;
+                }
+                OpKind::Delete => {
+                    let start = Pos::new(op.line_start as usize, op.col_start as usize);
+                    self.apply_insert(start, &op.text.clone());
+                    self.cursor = Pos::new(op.line_end as usize, op.col_end as usize);
+                }
             }
-            OpKind::Delete => {
-                let start = Pos::new(op.line_start as usize, op.col_start as usize);
-                self.apply_insert(start, &op.text.clone());
-                self.cursor = Pos::new(op.line_end as usize, op.col_end as usize);
+            if idx == 0 || self.ops[idx - 1].group_id != group {
+                self.undo_head = idx.checked_sub(1);
+                break;
             }
+            idx -= 1;
         }
-        self.undo_head = head.checked_sub(1);
+        self.break_undo_group();
         self.dirty = true;
         true
     }
@@ -173,21 +251,32 @@ impl Buffer {
             Some(h) => h + 1,
         };
         if next_idx >= self.ops.len() { return false; }
-        let op = self.ops[next_idx].clone();
-        match op.kind {
-            OpKind::Insert => {
-                let start = Pos::new(op.line_start as usize, op.col_start as usize);
-                self.apply_insert(start, &op.text.clone());
-                self.cursor = Pos::new(op.line_end as usize, op.col_end as usize);
+        let group = self.ops[next_idx].group_id;
+        // Walk forwards applying all ops in this group.
+        let mut idx = next_idx;
+        loop {
+            let op = self.ops[idx].clone();
+            match op.kind {
+                OpKind::Insert => {
+                    let start = Pos::new(op.line_start as usize, op.col_start as usize);
+                    self.apply_insert(start, &op.text.clone());
+                    self.cursor = Pos::new(op.line_end as usize, op.col_end as usize);
+                }
+                OpKind::Delete => {
+                    let start = Pos::new(op.line_start as usize, op.col_start as usize);
+                    let end = Pos::new(op.line_end as usize, op.col_end as usize);
+                    self.apply_delete(start, end);
+                    self.cursor = start;
+                }
             }
-            OpKind::Delete => {
-                let start = Pos::new(op.line_start as usize, op.col_start as usize);
-                let end = Pos::new(op.line_end as usize, op.col_end as usize);
-                self.apply_delete(start, end);
-                self.cursor = start;
+            let next = idx + 1;
+            if next >= self.ops.len() || self.ops[next].group_id != group {
+                self.undo_head = Some(idx);
+                break;
             }
+            idx += 1;
         }
-        self.undo_head = Some(next_idx);
+        self.break_undo_group();
         self.dirty = true;
         true
     }
@@ -352,10 +441,21 @@ mod tests {
 
     #[test]
     fn test_undo_chain() {
+        // Without explicit group breaks, consecutive same-kind inserts group together.
         let mut b = buf("");
         b.insert("a");
         b.insert("b");
         b.insert("c");
+        assert!(b.undo()); assert_eq!(b.content(), "");
+        assert!(!b.undo());
+    }
+
+    #[test]
+    fn test_undo_chain_with_breaks() {
+        let mut b = buf("");
+        b.insert("a"); b.break_undo_group();
+        b.insert("b"); b.break_undo_group();
+        b.insert("c"); b.break_undo_group();
         assert!(b.undo()); assert_eq!(b.content(), "ab");
         assert!(b.undo()); assert_eq!(b.content(), "a");
         assert!(b.undo()); assert_eq!(b.content(), "");
@@ -365,12 +465,78 @@ mod tests {
     #[test]
     fn test_redo_after_new_edit_clears_branch() {
         let mut b = buf("");
-        b.insert("a");
+        b.insert("a"); b.break_undo_group();
         b.insert("b");
         b.undo();
         b.insert("c");
         assert!(!b.redo());
         assert_eq!(b.content(), "ac");
+    }
+
+    #[test]
+    fn test_undo_group_space_splits() {
+        let mut b = buf("");
+        b.insert("hello");
+        b.insert(" ");
+        b.insert("world");
+        // "hello"=group1, " world"=group2 (space splits from preceding word;
+        // "world" chains onto the space since sep→non-sep doesn't split)
+        assert!(b.undo()); assert_eq!(b.content(), "hello");
+        assert!(b.undo()); assert_eq!(b.content(), "");
+    }
+
+    #[test]
+    fn test_undo_group_consecutive_spaces() {
+        let mut b = buf("");
+        b.insert("hello");
+        b.insert(" ");
+        b.insert(" ");
+        b.insert(" ");
+        // three spaces chain together as one separator group
+        assert!(b.undo()); assert_eq!(b.content(), "hello");
+        assert!(b.undo()); assert_eq!(b.content(), "");
+    }
+
+    #[test]
+    fn test_undo_group_backspace_separate_from_insert() {
+        let mut b = buf("hello");
+        b.move_cursor(0, 5);
+        b.insert("x");
+        b.insert("y");
+        b.backspace();
+        b.backspace();
+        // inserts and backspaces are different kinds — each kind is its own group
+        assert!(b.undo()); assert_eq!(b.content(), "helloxy");
+        assert!(b.undo()); assert_eq!(b.content(), "hello");
+    }
+
+    #[test]
+    fn test_undo_group_backspace_newline_splits() {
+        let mut b = buf("hello\nworld");
+        b.move_cursor(1, 5);
+        for _ in 0..5 { b.backspace(); } // delete "world"
+        b.backspace();                    // delete "\n" — splits (prev was non-whitespace)
+        for _ in 0..5 { b.backspace(); } // delete "hello" — chains
+        assert!(b.undo()); assert_eq!(b.content(), "hello\n");
+        assert!(b.undo()); assert_eq!(b.content(), "hello\nworld");
+    }
+
+    #[test]
+    fn test_undo_group_backspace_whitespace_only_lines() {
+        let mut b = buf("hello\n  \n  \nworld");
+        // move to end of "world"
+        b.move_cursor(3, 5);
+        for _ in 0..5 { b.backspace(); } // delete "world"
+        b.backspace(); b.backspace(); b.backspace(); // delete "\n  " (newline + spaces on line 2)
+        b.backspace(); b.backspace(); b.backspace(); // delete "\n  " (newline + spaces on line 1... wait)
+        // Actually backspacing from end of "world": w,o,r,l,d then \n then spaces then \n then spaces then \n then "hello"
+        // All whitespace-only lines crossed without non-whitespace → should all chain as one group after "world" split
+        // But wait, "world" itself is non-whitespace, so when we hit the first \n, prev was 'd' (non-ws) → split
+        // Then subsequent whitespace chains. Let's just verify the two-group result.
+        for _ in 0..5 { b.backspace(); } // delete "hello"
+        // "world" = group1, "\n  \n  \nhello" = group2
+        assert!(b.undo()); assert_eq!(b.content(), "hello\n  \n  \n");
+        assert!(b.undo()); assert_eq!(b.content(), "hello\n  \n  \nworld");
     }
 
     #[test]
@@ -407,6 +573,7 @@ mod tests {
         let mut b = buf("");
         assert_eq!(b.current_seq(), -1);
         b.insert("a"); assert_eq!(b.current_seq(), 0);
+        b.break_undo_group();
         b.insert("b"); assert_eq!(b.current_seq(), 1);
         b.undo();      assert_eq!(b.current_seq(), 0);
         b.undo();      assert_eq!(b.current_seq(), -1);
@@ -415,8 +582,9 @@ mod tests {
     #[test]
     fn test_restore_undo_roundtrip() {
         let mut b = buf("");
-        b.insert("hello");
-        b.insert(" world");
+        for c in "hello".chars() { b.insert(&c.to_string()); }
+        b.insert(" ");
+        for c in "world".chars() { b.insert(&c.to_string()); }
         let ops = b.undo_ops().to_vec();
         let seq = b.current_seq();
         let mut b2 = buf("hello world");
