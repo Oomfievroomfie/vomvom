@@ -393,7 +393,7 @@ impl ApplicationHandler for App {
                     state.highlight_dirty = false;
                     rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
                 }
-                sync_doc_to_session(&mut state.doc, &state.session, &state.highlight_cache);
+                sync_doc_to_session(&mut state.doc, &state.session, &state.highlight_cache, visible_lines(editor_h));
 
                 state.canvas.set_size(size.width, size.height, scale);
                 state.canvas.clear_rect(0, 0, size.width, size.height,
@@ -521,7 +521,7 @@ fn build_initial_document(session: &Session, cache: &std::collections::HashMap<i
         .with_child(statusbar);
 
     // Populate dynamic content.
-    update_editor_node(&mut root, session, cache);
+    update_editor_node(&mut root, session, cache, usize::MAX);
     update_statusbar_node(&mut root, session);
     root
 }
@@ -615,7 +615,7 @@ fn rebuild_highlight_cache(cache: &mut std::collections::HashMap<i64, Vec<Vec<(S
     cache.insert(buf.id, lines);
 }
 
-fn update_editor_node(root: &mut Node, session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>) {
+fn update_editor_node(root: &mut Node, session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>, max_lines: usize) {
     let buf = session.active();
     let cursor = buf.cursor;
     let scroll = buf.scroll_line;
@@ -623,7 +623,7 @@ fn update_editor_node(root: &mut Node, session: &Session, cache: &std::collectio
     let lines = cache.get(&buf.id).unwrap_or(&empty_cache);
     let Some(editor) = root.get_element_by_id("editor") else { return };
     editor.clear_children();
-    for i in scroll..buf.line_count() {
+    for i in scroll..(scroll + max_lines).min(buf.line_count()) {
         let mut line_node = Node::element("div").with_class("line");
         if i == cursor.line { line_node = line_node.with_class("cursor-line"); }
         let tokens = lines.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
@@ -664,8 +664,8 @@ fn update_tab_bar_node(root: &mut Node, session: &Session) {
 }
 
 // Public wrappers used by event handlers.
-fn update_editor(doc: &mut Document, session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>) {
-    update_editor_node(&mut doc.root, session, cache);
+fn update_editor(doc: &mut Document, session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>, max_lines: usize) {
+    update_editor_node(&mut doc.root, session, cache, max_lines);
     doc.mark_dirty();
 }
 
@@ -674,9 +674,9 @@ fn update_statusbar(doc: &mut Document, session: &Session) {
     doc.mark_dirty();
 }
 
-fn sync_doc_to_session(doc: &mut Document, session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>) {
+fn sync_doc_to_session(doc: &mut Document, session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>, max_lines: usize) {
     update_tab_bar_node(&mut doc.root, session);
-    update_editor_node(&mut doc.root, session, cache);
+    update_editor_node(&mut doc.root, session, cache, max_lines);
     update_statusbar_node(&mut doc.root, session);
     doc.mark_dirty();
 }
