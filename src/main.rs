@@ -533,11 +533,8 @@ impl ApplicationHandler for App {
 
 fn build_stylesheet(editor_font_size: f32) -> Stylesheet {
     let patched = MAIN_CSS
-        .replace(".editor {\n    flex-grow: 1;\n    background-color: rgba(33, 33, 41, 1.0);\n    padding: 16px;\n    font-family: monospace;\n    font-size: 12px;",
-                 &format!(".editor {{\n    flex-grow: 1;\n    background-color: rgba(33, 33, 41, 1.0);\n    padding: 16px;\n    font-family: monospace;\n    font-size: {}px;", editor_font_size));
-    let patched = patched
-        .replace(".line {\n    display: flex;\n    flex-direction: row;\n    line-height: 1.4;\n    font-size: 12px;",
-                 &format!(".line {{\n    display: flex;\n    flex-direction: row;\n    line-height: 1.4;\n    font-size: {}px;", editor_font_size));
+        .replace("12px;/*EDITORFONT*/",
+                 &format!("{}px;", editor_font_size));
     parse_stylesheet(&patched)
 }
 
@@ -1069,8 +1066,8 @@ fn compute_cursor_x(
     let layout_idx = logical_line - scroll;
     let editor_lb = last_layout.as_ref()?.children.get(2)?;
     let editor_node = doc_root.children().get(2)?;
-    let line_lb = editor_lb.children.get(layout_idx)?;
-    let line_node = editor_node.children().get(layout_idx)?;
+    let line_lb = editor_lb.children.get(layout_idx + 1)?;
+    let line_node = editor_node.children().get(layout_idx + 1)?;
     let (_, x) = cursor_visual_row_and_x(canvas, line_lb, line_node, col, mono_font, mono_data, font_size);
     Some(x)
 }
@@ -1098,7 +1095,7 @@ fn move_cursor_vertical(
             last_layout.as_ref().and_then(|lb| lb.children.get(2)),
             doc_root.children().get(2),
         ) {
-            if let (Some(line_lb), Some(line_node)) = (editor_lb.children.get(layout_idx), editor_node.children().get(layout_idx)) {
+            if let (Some(line_lb), Some(line_node)) = (editor_lb.children.get(layout_idx + 1), editor_node.children().get(layout_idx + 1)) {
                 let span_count = line_node.children().len();
                 let rows = visual_rows_for_line(line_lb, span_count);
                 let (cur_vrow, _) = cursor_visual_row_and_x(canvas, line_lb, line_node, col, mono_font, mono_data, font_size);
@@ -1128,7 +1125,7 @@ fn move_cursor_vertical(
         last_layout.as_ref().and_then(|lb| lb.children.get(2)),
         doc_root.children().get(2),
     ) {
-        if let (Some(line_lb), Some(line_node)) = (editor_lb.children.get(target_layout_idx), editor_node.children().get(target_layout_idx)) {
+        if let (Some(line_lb), Some(line_node)) = (editor_lb.children.get(target_layout_idx + 1), editor_node.children().get(target_layout_idx + 1)) {
             let span_count = line_node.children().len();
             let rows = visual_rows_for_line(line_lb, span_count);
             // Going up → last visual row; going down → first visual row.
@@ -1262,8 +1259,9 @@ fn paint_cursors_with_text(
     let line_h = font_size * 1.4;
 
     for &(line_idx, col, _line_text) in cursors {
-        let Some(line_lb) = editor_lb.children.get(line_idx) else { continue };
-        let Some(line_node) = editor_node.children().get(line_idx) else { continue };
+        // child[0] is line-numbers sidebar; text lines start at child[1]
+        let Some(line_lb) = editor_lb.children.get(line_idx + 1) else { continue };
+        let Some(line_node) = editor_node.children().get(line_idx + 1) else { continue };
 
         // Walk spans to find which span contains col, and x offset within it.
         let mut char_offset = 0usize;
@@ -1341,15 +1339,18 @@ fn hit_test_editor(
     let scroll = buf.scroll_line;
     let line_h = font_size * 1.4;
 
-    // Last child is the scrollbar track (absolutely positioned), not a text line.
-    let line_count = editor_lb.children.len().saturating_sub(1);
-    if line_count == 0 { return Some((0, 0)); }
+    // child[0] is line-numbers (abs), child[1..n-1] are text lines, last is scrollbar (abs).
+    let total_children = editor_lb.children.len();
+    if total_children < 2 { return Some((0, 0)); }
+    // Text lines are children[1..total_children-1].
+    let text_lines = &editor_lb.children[1..total_children - 1];
+    if text_lines.is_empty() { return Some((0, 0)); }
 
-    // Find the best visual row by scanning all spans across all lines.
+    // Find the best visual row by scanning all spans across all text lines.
     // A span's visual row top is span_lb.border_box.y. We want the row whose
     // top is <= my and is closest (i.e. largest y <= my).
     let mut best_row_y = f32::NEG_INFINITY;
-    for line_lb in &editor_lb.children[..line_count] {
+    for line_lb in text_lines {
         for span_lb in &line_lb.children {
             let sy = span_lb.border_box.y;
             if sy <= my && sy > best_row_y {
@@ -1359,32 +1360,44 @@ fn hit_test_editor(
     }
     // If nothing found above the click, use the topmost row.
     if best_row_y == f32::NEG_INFINITY {
-        best_row_y = editor_lb.children[..line_count].iter()
+        best_row_y = text_lines.iter()
             .flat_map(|l| l.children.iter())
             .map(|s| s.border_box.y)
             .fold(f32::INFINITY, f32::min);
     }
 
-    // Among all spans on that visual row, find the one closest in x to the click.
+    // Among all spans on that visual row, find which span contains the click x.
+    // Pick the first span whose right edge >= mx; fall back to the last span on the row.
+    // best_line_idx is the index into text_lines (0-based among text lines).
     let mut best_line_idx = 0usize;
     let mut best_span_idx = 0usize;
-    let mut best_x_dist = f32::INFINITY;
+    let mut found = false;
 
-    for (li, line_lb) in editor_lb.children[..line_count].iter().enumerate() {
-        for (si, span_lb) in line_lb.children.iter().enumerate() {
-            if (span_lb.border_box.y - best_row_y).abs() > line_h * 0.5 { continue; }
-            let span_center_x = span_lb.border_box.x + span_lb.border_box.w / 2.0;
-            let dist = (span_center_x - mx).abs();
-            if dist < best_x_dist {
-                best_x_dist = dist;
+    'outer: for (li, line_lb) in text_lines.iter().enumerate() {
+        let row_spans: Vec<(usize, &LayoutBox)> = line_lb.children.iter().enumerate()
+            .filter(|(_, s)| (s.border_box.y - best_row_y).abs() <= line_h * 0.5)
+            .collect();
+        if row_spans.is_empty() { continue; }
+        for &(si, span_lb) in &row_spans {
+            if mx <= span_lb.border_box.x + span_lb.border_box.w {
                 best_line_idx = li;
                 best_span_idx = si;
+                found = true;
+                break 'outer;
             }
         }
+        // Click is past all spans on this row — use the last one.
+        if let Some(&(si, _)) = row_spans.last() {
+            best_line_idx = li;
+            best_span_idx = si;
+            found = true;
+        }
     }
+    if !found { best_line_idx = 0; best_span_idx = 0; }
 
     let buf_line = best_line_idx + scroll;
-    let line_node = editor_node.children().get(best_line_idx)?;
+    // editor_node child[0] is line-numbers, text lines start at child[1].
+    let line_node = editor_node.children().get(best_line_idx + 1)?;
 
     // Accumulate char offset up to best_span_idx.
     let mut char_base = 0usize;
@@ -1403,7 +1416,7 @@ fn hit_test_editor(
     let span_text = span_node.children().first()
         .and_then(|n| if let render::tree::NodeContent::Text(t) = &n.content { Some(t.as_str()) } else { None })
         .unwrap_or("");
-    let span_lb = &editor_lb.children[best_line_idx].children[best_span_idx];
+    let span_lb = &editor_lb.children[best_line_idx + 1].children[best_span_idx];
     let local_x = mx - span_lb.border_box.x;
 
     let chars: Vec<char> = span_text.chars().collect();

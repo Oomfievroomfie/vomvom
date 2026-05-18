@@ -68,7 +68,7 @@ root {
     background-color: rgba(33, 33, 41, 1.0);
     padding: 16px;
     font-family: monospace;
-    font-size: 12px;
+    font-size: 12px;/*EDITORFONT*/
     color: rgba(217, 217, 230, 1.0);
     overflow-y: hidden;
     position: relative;
@@ -82,7 +82,7 @@ root {
     background-color: rgba(33, 33, 41, 1.0);
     color: rgba(120, 120, 140, 1.0);
     font-family: monospace;
-    font-size: 12px;
+    font-size: 12px;/*EDITORFONT*/
     padding: 16px 8px 0 16px;
     overflow-y: hidden;
     height: 100%;
@@ -91,7 +91,7 @@ root {
 .line-number {
     display: block;
     line-height: 1.4;
-    font-size: 12px;
+    font-size: 12px;/*EDITORFONT*/
 }
 
 .scrollbar-track {
@@ -117,7 +117,7 @@ root {
     flex-direction: row;
     flex-wrap: wrap;
     line-height: 1.4;
-    font-size: 12px;
+    font-size: 12px;/*EDITORFONT*/
 }
 
 .line span {
