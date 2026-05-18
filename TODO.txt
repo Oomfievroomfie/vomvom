@@ -7,7 +7,7 @@ Rendering engine:
   [x] Swash hinting glyph cache (manual Rgba8 atlas)
   [x] OpenSans (sans) + FiraMono (mono) fonts embedded
   [x] femtovg swash feature enabled (used in F-key debug path)
-  [ ] Performance tests for layout/style
+  [x] Performance tests for layout/style (perf_layout_deep_tree, perf_layout_flat_flex, perf_style_cascade)
 
 Hot exit (session):
   [x] SQLite schema + CRUD (WAL, bundled)
