@@ -89,9 +89,46 @@ root {
 }
 
 .line {
-    display: block;
+    display: flex;
+    flex-direction: row;
     line-height: 1.4;
     font-size: 12px;
+}
+
+.line span {
+    display: inline-block;
+}
+
+.tok-kw {
+    color: rgba(197, 134, 192, 1.0);
+}
+
+.tok-type {
+    color: rgba(78, 201, 176, 1.0);
+}
+
+.tok-str {
+    color: rgba(206, 145, 120, 1.0);
+}
+
+.tok-num {
+    color: rgba(181, 206, 168, 1.0);
+}
+
+.tok-comment {
+    color: rgba(106, 153, 85, 1.0);
+}
+
+.tok-macro {
+    color: rgba(220, 220, 170, 1.0);
+}
+
+.tok-lifetime {
+    color: rgba(86, 156, 214, 1.0);
+}
+
+.tok-punct {
+    color: rgba(204, 204, 204, 0.7);
 }
 
 .cursor-line {

@@ -1,3 +1,4 @@
+mod highlight;
 mod render;
 mod screenshot;
 mod session;
@@ -576,13 +577,24 @@ fn update_editor_node(root: &mut Node, session: &Session) {
     let buf = session.active();
     let cursor = buf.cursor;
     let scroll = buf.scroll_line;
+    let lang = highlight::lang_from_path(buf.path.as_deref());
     let Some(editor) = root.get_element_by_id("editor") else { return };
     editor.clear_children();
     for i in scroll..buf.line_count() {
         let text = buf.line(i);
         let mut line_node = Node::element("div").with_class("line");
         if i == cursor.line { line_node = line_node.with_class("cursor-line"); }
-        line_node = line_node.with_child(Node::text(if text.is_empty() { " ".into() } else { text }));
+        if text.is_empty() {
+            line_node = line_node.with_child(Node::text(" "));
+        } else {
+            let tokens = highlight::tokenize_line(&text, lang);
+            for (tok_text, tok_class) in tokens {
+                let mut span = Node::element("span");
+                if !tok_class.is_empty() { span = span.with_class(tok_class); }
+                span = span.with_child(Node::text(tok_text.to_string()));
+                line_node = line_node.with_child(span);
+            }
+        }
         editor.append_child(line_node);
     }
     let scrollbar = Node::element("div").with_class("scrollbar-track").with_id("scrollbar-track")
@@ -668,6 +680,7 @@ fn close_all_menus(doc: &mut Document) {
 pub fn build_demo_scene() -> (Node, Stylesheet) {
     let sheet = build_stylesheet();
     let mut session = Session::open(":memory:").expect("in-memory session");
+    session.active_mut().path = Some("demo.rs".into());
     session.active_mut().insert("// vomvom — custom rendering engine\n\nmod render;\n\nfn main() {\n    // build scene, run event loop\n    println!(\"hello world\");\n}");
     let mut doc = Document::new(build_initial_document(&session));
     open_menu(&mut doc, "file");
