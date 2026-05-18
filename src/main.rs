@@ -26,7 +26,7 @@ use winit::{
 use render::layout::{layout, finalize_positions, Constraints, LayoutBox};
 use render::paint::{PaintContext, paint_tree_root};
 use render::style::Stylesheet;
-use render::tree::{Node, apply_styles};
+use render::tree::{Document, Node, apply_styles};
 use render::glyph_cache::GlyphCache;
 use render::css_parse::parse_stylesheet;
 use render::html_parse::parse_html;
@@ -56,10 +56,10 @@ struct AppState {
     femtovg_fonts: Option<(FontId, FontId)>,
     sheet: Stylesheet,
     session: Session,
+    doc: Document,
     modifiers: Modifiers,
     mouse_pos: (f32, f32),
-    last_layout: Option<(Node, LayoutBox)>,
-    open_menu: Option<String>,
+    last_layout: Option<LayoutBox>,
 }
 
 impl App {
@@ -134,6 +134,8 @@ impl ApplicationHandler for App {
             session.set_active(idx);
         }
 
+        let doc = Document::new(build_initial_document(&session));
+
         self.state = Some(AppState {
             window,
             canvas,
@@ -145,10 +147,10 @@ impl ApplicationHandler for App {
             femtovg_fonts: None,
             sheet,
             session,
+            doc,
             modifiers: Modifiers::default(),
             mouse_pos: (0.0, 0.0),
             last_layout: None,
-            open_menu: None,
         });
     }
 
@@ -170,15 +172,16 @@ impl ApplicationHandler for App {
                 let key = event.logical_key.clone();
                 let mut dirty = true;
 
-                // Handle commands that need full session access first.
                 match &key {
                     Key::Character(s) if ctrl && (s == "o" || s == "O") => {
                         open_file_dialog(&mut state.session);
+                        sync_doc_to_session(&mut state.doc, &state.session);
                         state.window.request_redraw();
                         return;
                     }
                     Key::Character(s) if ctrl && (s == "s" || s == "S") => {
                         let _ = state.session.save_active();
+                        update_statusbar(&mut state.doc, &state.session);
                         state.window.request_redraw();
                         return;
                     }
@@ -199,10 +202,8 @@ impl ApplicationHandler for App {
                 let buf = state.session.active_mut();
                 match &key {
                     Key::Named(NamedKey::Escape) => {
-                        if state.open_menu.is_some() {
-                            state.open_menu = None;
-                            state.window.request_redraw();
-                        }
+                        close_all_menus(&mut state.doc);
+                        state.window.request_redraw();
                         return;
                     }
                     Key::Character(s) if ctrl && (s == "z" || s == "Z") => { buf.undo(); }
@@ -242,36 +243,41 @@ impl ApplicationHandler for App {
                     Key::Character(s) if !ctrl => { buf.insert(s); }
                     _ => { dirty = false; }
                 }
-                if dirty { state.window.request_redraw(); }
+                if dirty {
+                    update_editor(&mut state.doc, &state.session);
+                    update_statusbar(&mut state.doc, &state.session);
+                    state.window.request_redraw();
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 state.mouse_pos = (position.x as f32, position.y as f32);
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: winit::event::MouseButton::Left, .. } => {
                 let (mx, my) = state.mouse_pos;
-                if let Some((ref scene, ref lb)) = state.last_layout.clone() {
+                if let Some(ref lb) = state.last_layout.clone() {
                     // Menu item click (dropdown open)?
-                    if state.open_menu.is_some() {
-                        if let Some(action) = hit_test_menu_item(scene, lb, mx, my) {
-                            state.open_menu = None;
+                    if any_menu_open(&state.doc) {
+                        if let Some(action) = hit_test_menu_item(&state.doc.root, lb, mx, my) {
+                            close_all_menus(&mut state.doc);
                             execute_menu_action(&action, &mut state.session);
+                            sync_doc_to_session(&mut state.doc, &state.session);
                             state.window.request_redraw();
                             return;
                         }
-                        // Click outside menu: close it.
-                        state.open_menu = None;
+                        close_all_menus(&mut state.doc);
                         state.window.request_redraw();
                         return;
                     }
                     // Menu header click?
-                    if let Some(menu) = hit_test_menu_header(scene, lb, mx, my) {
-                        state.open_menu = Some(menu);
+                    if let Some(menu_id) = hit_test_menu_header(&state.doc.root, lb, mx, my) {
+                        open_menu(&mut state.doc, &menu_id);
                         state.window.request_redraw();
                         return;
                     }
                     // Tab click?
-                    if let Some(idx) = hit_test_tab(scene, lb, mx, my) {
+                    if let Some(idx) = hit_test_tab(&state.doc.root, lb, mx, my) {
                         state.session.set_active(idx);
+                        sync_doc_to_session(&mut state.doc, &state.session);
                         state.window.request_redraw();
                     }
                 }
@@ -288,15 +294,14 @@ impl ApplicationHandler for App {
                 state.canvas.clear_rect(0, 0, size.width, size.height,
                     femtovg::Color::rgbf(0.15, 0.15, 0.18));
 
-                let mut scene = build_scene(&state.session, &state.sheet, state.open_menu.as_deref());
-                apply_styles(&mut scene, &state.sheet, &[], None);
+                apply_styles(&mut state.doc.root, &state.sheet, &[], None);
                 let mut measurer = render::femtovg_measurer::SwashMeasurer {
                     sans_data: SANS_BYTES,
                     mono_data: MONO_BYTES,
                 };
-                let mut lb = layout(&scene, Constraints::new(w, h), &mut measurer);
+                let mut lb = layout(&state.doc.root, Constraints::new(w, h), &mut measurer);
                 finalize_positions(&mut lb);
-                state.last_layout = Some((scene.clone(), lb.clone()));
+                state.last_layout = Some(lb.clone());
 
                 if state.femtovg_fonts.is_none() {
                     let sans_id = state.canvas.add_font_mem(SANS_BYTES).expect("load sans");
@@ -313,7 +318,7 @@ impl ApplicationHandler for App {
                     use_femtovg: state.use_femtovg,
                     femtovg_fonts: state.femtovg_fonts,
                 };
-                paint_tree_root(&mut ctx, &scene, &lb);
+                paint_tree_root(&mut ctx, &state.doc.root, &lb);
 
                 state.canvas.flush();
                 state.gl_surface.swap_buffers(&state.gl_context).unwrap();
@@ -343,77 +348,157 @@ fn build_stylesheet() -> Stylesheet {
     parse_stylesheet(MAIN_CSS)
 }
 
-fn build_scene(session: &Session, _sheet: &Stylesheet, open_menu: Option<&str>) -> Node {
-    let buf = session.active();
-    let cursor = buf.cursor;
-    let line_count = buf.line_count();
-
-    let path_label = buf.path.as_deref().unwrap_or("[untitled]");
-    let modified_marker = if buf.is_modified { " ●" } else { "" };
-    let status_left = format!("{}{}", path_label, modified_marker);
-    let status_right = format!("Ln {}, Col {}  UTF-8", cursor.line + 1, cursor.col + 1);
-
-    // Menu headers — clicking opens their dropdown.
+// Build the initial retained document. Called once; subsequent updates use
+// the targeted mutation functions below.
+fn build_initial_document(session: &Session) -> Node {
     let menus = [("File", "file"), ("Edit", "edit")];
-    let mut toolbar = Node::element("div").with_class("toolbar");
+    let mut toolbar = Node::element("div").with_class("toolbar").with_id("toolbar");
     for (label, id) in &menus {
-        let mut header = Node::element("div")
+        let header = Node::element("div")
             .with_class("menu-header")
-            .with_attr("menu", *id);
-        if open_menu == Some(id) { header = header.with_class("open"); }
-        header = header.with_child(Node::text(*label));
-
-        // Attach dropdown as absolutely-positioned child of the header.
-        if open_menu == Some(id) {
-            let dropdown = build_dropdown(id);
-            header = header.with_child(dropdown);
-        }
+            .with_id(&format!("menu-{}", id))
+            .with_attr("menu", *id)
+            .with_child(Node::text(*label));
         toolbar = toolbar.with_child(header);
     }
 
-    // Tab bar: one tab per buffer
-    let mut tab_bar = Node::element("div").with_class("tab-bar");
+    let mut tab_bar = Node::element("div").with_class("tab-bar").with_id("tab-bar");
     for (i, b) in session.buffers.iter().enumerate() {
-        let label = b.path.as_deref()
-            .and_then(|p| std::path::Path::new(p).file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("[untitled]")
-            .to_string();
-        let modified = if b.is_modified { " ●" } else { "" };
-        let mut tab = Node::element("div").with_class("tab");
-        if i == session.active_idx { tab = tab.with_class("active"); }
-        tab = tab.with_attr("tab-idx", &i.to_string())
-            .with_child(Node::text(format!("{}{}", label, modified)));
-        tab_bar = tab_bar.with_child(tab);
+        tab_bar = tab_bar.with_child(make_tab_node(b, i, i == session.active_idx));
     }
 
-    let mut editor = Node::element("div").with_class("editor");
-    for i in 0..line_count {
+    let editor = Node::element("div").with_class("editor").with_id("editor");
+
+    let statusbar = Node::element("div")
+        .with_class("statusbar")
+        .with_id("statusbar")
+        .with_child(Node::element("span").with_id("status-left"))
+        .with_child(Node::element("span").with_id("status-right"));
+
+    let mut root = Node::element("root")
+        .with_child(toolbar)
+        .with_child(tab_bar)
+        .with_child(editor)
+        .with_child(statusbar);
+
+    // Populate dynamic content.
+    update_editor_node(&mut root, session);
+    update_statusbar_node(&mut root, session);
+    root
+}
+
+fn make_tab_node(b: &session::buffer::Buffer, idx: usize, active: bool) -> Node {
+    let label = b.path.as_deref()
+        .and_then(|p| std::path::Path::new(p).file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("[untitled]")
+        .to_string();
+    let modified = if b.is_modified { " ●" } else { "" };
+    let mut tab = Node::element("div").with_class("tab")
+        .with_attr("tab-idx", &idx.to_string())
+        .with_child(Node::text(format!("{}{}", label, modified)));
+    if active { tab = tab.with_class("active"); }
+    tab
+}
+
+// --- Targeted document mutation functions ---
+
+fn update_editor_node(root: &mut Node, session: &Session) {
+    let buf = session.active();
+    let cursor = buf.cursor;
+    let Some(editor) = root.get_element_by_id("editor") else { return };
+    editor.clear_children();
+    for i in 0..buf.line_count() {
         let text = buf.line(i).to_string();
         let mut line_node = Node::element("div").with_class("line");
         if i == cursor.line { line_node = line_node.with_class("cursor-line"); }
         line_node = line_node.with_child(Node::text(if text.is_empty() { " ".into() } else { text }));
-        editor = editor.with_child(line_node);
+        editor.append_child(line_node);
     }
+}
 
-    let statusbar = Node::element("div")
-        .with_class("statusbar")
-        .with_child(Node::text(status_left))
-        .with_child(Node::text(status_right));
+fn update_statusbar_node(root: &mut Node, session: &Session) {
+    let buf = session.active();
+    let cursor = buf.cursor;
+    let path_label = buf.path.as_deref().unwrap_or("[untitled]");
+    let modified_marker = if buf.is_modified { " ●" } else { "" };
+    let status_left = format!("{}{}", path_label, modified_marker);
+    let status_right = format!("Ln {}, Col {}  UTF-8", cursor.line + 1, cursor.col + 1);
+    if let Some(n) = root.get_element_by_id("status-left") { n.set_text_content(status_left); }
+    if let Some(n) = root.get_element_by_id("status-right") { n.set_text_content(status_right); }
+}
 
-    Node::element("root")
-        .with_child(toolbar)
-        .with_child(tab_bar)
-        .with_child(editor)
-        .with_child(statusbar)
+fn update_tab_bar_node(root: &mut Node, session: &Session) {
+    let Some(tab_bar) = root.get_element_by_id("tab-bar") else { return };
+    tab_bar.clear_children();
+    for (i, b) in session.buffers.iter().enumerate() {
+        tab_bar.append_child(make_tab_node(b, i, i == session.active_idx));
+    }
+}
+
+// Public wrappers used by event handlers.
+fn update_editor(doc: &mut Document, session: &Session) {
+    update_editor_node(&mut doc.root, session);
+    doc.mark_dirty();
+}
+
+fn update_statusbar(doc: &mut Document, session: &Session) {
+    update_statusbar_node(&mut doc.root, session);
+    doc.mark_dirty();
+}
+
+fn sync_doc_to_session(doc: &mut Document, session: &Session) {
+    update_tab_bar_node(&mut doc.root, session);
+    update_editor_node(&mut doc.root, session);
+    update_statusbar_node(&mut doc.root, session);
+    doc.mark_dirty();
+}
+
+// --- Menu open/close (mutates the retained document) ---
+
+fn any_menu_open(doc: &Document) -> bool {
+    for id in ["menu-file", "menu-edit"] {
+        if let Some(n) = doc.root.get_element_by_id_ref(id) {
+            if n.has_class("open") { return true; }
+        }
+    }
+    false
+}
+
+fn open_menu(doc: &mut Document, menu_id: &str) {
+    // Close any other open menus first.
+    close_all_menus(doc);
+    let node_id = format!("menu-{}", menu_id);
+    if let Some(header) = doc.get_element_by_id(&node_id) {
+        header.add_class("open");
+        let dropdown = build_dropdown(menu_id);
+        header.append_child(dropdown);
+    }
+    doc.mark_dirty();
+}
+
+fn close_all_menus(doc: &mut Document) {
+    for id in ["menu-file", "menu-edit"] {
+        if let Some(header) = doc.get_element_by_id(id) {
+            if header.has_class("open") {
+                header.remove_class("open");
+                // Remove all children except the first (the label text node).
+                if let render::tree::NodeContent::Element { children, .. } = &mut header.content {
+                    children.truncate(1);
+                }
+            }
+        }
+    }
+    doc.mark_dirty();
 }
 
 pub fn build_demo_scene() -> (Node, Stylesheet) {
     let sheet = build_stylesheet();
     let mut session = Session::open(":memory:").expect("in-memory session");
     session.active_mut().insert("// vomvom — custom rendering engine\n\nmod render;\n\nfn main() {\n    // build scene, run event loop\n    println!(\"hello world\");\n}");
-    let scene = build_scene(&session, &sheet, Some("file"));
-    (scene, sheet)
+    let mut doc = Document::new(build_initial_document(&session));
+    open_menu(&mut doc, "file");
+    (doc.root, sheet)
 }
 
 fn main() {
@@ -460,14 +545,14 @@ fn execute_menu_action(action: &str, session: &mut Session) {
     }
 }
 
-// Walk toolbar menu headers (children of toolbar = root child 0).
-fn hit_test_menu_header(scene: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<String> {
+// Walk toolbar menu headers by hit-testing their layout boxes, then reading
+// the "menu" attribute from the corresponding node to identify which menu.
+fn hit_test_menu_header(root: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<String> {
     use render::tree::NodeContent;
     let toolbar_lb = lb.children.first()?;
-    let toolbar_node = scene.children().first()?;
+    let toolbar_node = root.children().first()?;
     for (i, child_lb) in toolbar_lb.children.iter().enumerate() {
-        let r = child_lb.border_box;
-        if r.contains(mx, my) {
+        if child_lb.border_box.contains(mx, my) {
             let child_node = &toolbar_node.children()[i];
             if let NodeContent::Element { attrs, .. } = &child_node.content {
                 if let Some(menu) = attrs.get("menu") {
@@ -479,19 +564,15 @@ fn hit_test_menu_header(scene: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Optio
     None
 }
 
-// Walk dropdown menu items. Dropdown is a child of the open menu header.
-fn hit_test_menu_item(scene: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<String> {
+// Walk the open dropdown's items, returning the "action" attr of the hit item.
+fn hit_test_menu_item(root: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<String> {
     use render::tree::NodeContent;
     let toolbar_lb = lb.children.first()?;
-    let toolbar_node = scene.children().first()?;
-    // Find the open menu header (the one with a dropdown child).
+    let toolbar_node = root.children().first()?;
     for (i, header_lb) in toolbar_lb.children.iter().enumerate() {
         let header_node = &toolbar_node.children()[i];
-        // The dropdown is the last child if present.
         let dropdown_node = header_node.children().last()?;
-        if let NodeContent::Element { classes, .. } = &dropdown_node.content {
-            if !classes.contains(&"dropdown".to_string()) { continue; }
-        } else { continue; }
+        if !dropdown_node.has_class("dropdown") { continue; }
         let dropdown_lb = header_lb.children.last()?;
         for (j, item_lb) in dropdown_lb.children.iter().enumerate() {
             if item_lb.border_box.contains(mx, my) {
@@ -516,32 +597,10 @@ fn open_file_dialog(session: &mut Session) {
     }
 }
 
-fn hit_test_toolbar(scene: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<String> {
+fn hit_test_tab(root: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<usize> {
     use render::tree::NodeContent;
-    // Walk toolbar children (first child of root = toolbar, its children = buttons)
-    let toolbar_lb = lb.children.first()?;
-    let root_children = scene.children();
-    let toolbar_node = root_children.first()?;
-    for (i, btn_lb) in toolbar_lb.children.iter().enumerate() {
-        let r = btn_lb.border_box;
-        if mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h {
-            let btn_node = &toolbar_node.children()[i];
-            if let NodeContent::Element { attrs, .. } = &btn_node.content {
-                if let Some(action) = attrs.get("action") {
-                    return Some(action.clone());
-                }
-            }
-        }
-    }
-    None
-}
-
-fn hit_test_tab(scene: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<usize> {
-    use render::tree::NodeContent;
-    // Tab bar is second child of root
     let tab_bar_lb = lb.children.get(1)?;
-    let root_children = scene.children();
-    let tab_bar_node = root_children.get(1)?;
+    let tab_bar_node = root.children().get(1)?;
     for (i, tab_lb) in tab_bar_lb.children.iter().enumerate() {
         let r = tab_lb.border_box;
         if mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h {
