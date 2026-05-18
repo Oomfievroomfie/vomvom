@@ -88,7 +88,7 @@ pub fn save_screenshot(path: &Path, width: u32, height: u32) {
     crate::rebuild_highlight_cache(&mut highlight_cache, &session);
 
     let mut glyph_cache = GlyphCache::new();
-    render_frame(
+    let lb = render_frame(
         &mut canvas,
         &mut glyph_cache,
         &mut doc,
@@ -102,6 +102,7 @@ pub fn save_screenshot(path: &Path, width: u32, height: u32) {
         femtovg_fonts,
         true,
         true, // use femtovg for screenshot
+        None,
     );
 
     canvas.flush();

@@ -175,7 +175,7 @@ fn layout_element(node: &Node, constraints: Constraints, measurer: &mut dyn Text
     } else {
         inner_h
     };
-    layout_absolute_children(node, inner_w, abs_containing_h, &mut children, measurer);
+    layout_absolute_children(node, inner_w, abs_containing_h, pl, pt, bw, &mut children, measurer);
 
     // For shrink-wrap elements, width comes from in-flow children extents only.
     let inner_w = if shrink_wrap {
@@ -219,32 +219,37 @@ fn layout_block_children(node: &Node, constraints: Constraints, measurer: &mut d
     result
 }
 
-fn layout_absolute_children(node: &Node, containing_w: f32, containing_h: f32, children_lbs: &mut Vec<LayoutBox>, measurer: &mut dyn TextMeasurer) {
+fn layout_absolute_children(node: &Node, containing_w: f32, containing_h: f32, parent_pl: f32, parent_pt: f32, parent_bw: f32, children_lbs: &mut Vec<LayoutBox>, measurer: &mut dyn TextMeasurer) {
+    // Absolute children are positioned relative to the containing block's padding box.
+    // containing_w/h are the content dimensions, so we add parent padding to get padding-box size.
+    let pad_box_w = containing_w + parent_pl + parent_bw; // right side symmetric handled by right: anchor
+    let pad_box_h = containing_h + parent_pt + parent_bw;
+
     for (i, child) in node.children().iter().enumerate() {
         let cs = &child.style;
         if cs.position != Position::Absolute { continue; }
 
-        let avail_w = resolve_length(cs.width, containing_w).unwrap_or(containing_w);
-        let mut lb = layout(child, Constraints::new(avail_w, containing_h), measurer);
+        let avail_w = resolve_length(cs.width, pad_box_w).unwrap_or(f32::INFINITY);
+        let mut lb = layout(child, Constraints::new(avail_w, pad_box_h), measurer);
 
-        let x = resolve_length(cs.left, containing_w)
-            .or_else(|| resolve_length(cs.right, containing_w).map(|r| containing_w - lb.border_box.w - r))
-            .unwrap_or(0.0);
-        let y = resolve_length(cs.top, containing_h)
-            .or_else(|| resolve_length(cs.bottom, containing_h).map(|b| containing_h - lb.border_box.h - b))
-            .unwrap_or(0.0);
+        // x/y are in padding-box space; convert to content space by subtracting parent padding.
+        let x = resolve_length(cs.left, pad_box_w)
+            .or_else(|| resolve_length(cs.right, pad_box_w).map(|r| pad_box_w - lb.border_box.w - r))
+            .unwrap_or(0.0)
+            - parent_pl - parent_bw;
+        let y = resolve_length(cs.top, pad_box_h)
+            .or_else(|| resolve_length(cs.bottom, pad_box_h).map(|b| pad_box_h - lb.border_box.h - b))
+            .unwrap_or(0.0)
+            - parent_pt - parent_bw;
 
         lb.border_box.x = x;
         lb.border_box.y = y;
-        lb.content.x = x + (lb.content.x - lb.border_box.x.min(lb.content.x));
-        lb.content.y = y + (lb.content.y - lb.border_box.y.min(lb.content.y));
 
-        // Recalculate content offset from border_box properly.
-        let bw = cs.border.width;
-        let pl = cs.padding.left.resolve(containing_w);
-        let pt = cs.padding.top.resolve(containing_h);
-        lb.content.x = x + pl + bw;
-        lb.content.y = y + pt + bw;
+        let child_bw = cs.border.width;
+        let child_pl = cs.padding.left.resolve(pad_box_w);
+        let child_pt = cs.padding.top.resolve(pad_box_h);
+        lb.content.x = x + child_pl + child_bw;
+        lb.content.y = y + child_pt + child_bw;
 
         children_lbs[i] = lb;
     }

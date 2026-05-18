@@ -74,6 +74,25 @@ root {
     position: relative;
 }
 
+.line-numbers {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: flex;
+    flex-direction: column;
+    background-color: rgba(33, 33, 41, 1.0);
+    color: rgba(120, 120, 140, 1.0);
+    font-family: monospace;
+    font-size: 12px;
+    padding: 16px 8px 16px 16px;
+}
+
+.line-number {
+    display: block;
+    line-height: 1.4;
+    font-size: 12px;
+}
+
 .scrollbar-track {
     position: absolute;
     top: 0;

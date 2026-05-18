@@ -469,6 +469,7 @@ impl ApplicationHandler for App {
                     state.femtovg_fonts,
                     state.hint,
                     state.use_femtovg,
+                    state.last_layout.as_ref(),
                 );
                 state.last_layout = Some(lb.clone());
 
@@ -574,7 +575,7 @@ fn build_initial_document(session: &Session, cache: &std::collections::HashMap<i
         .with_child(statusbar);
 
     // Populate dynamic content.
-    update_editor_node(&mut root, session, cache, usize::MAX);
+    update_editor_node(&mut root, session, cache, usize::MAX, None);
     update_statusbar_node(&mut root, session);
     root
 }
@@ -640,6 +641,24 @@ pub fn update_scrollbar_styles(root: &mut Node, session: &Session, editor_h: f32
     }
 }
 
+pub fn update_line_numbers_styles(root: &mut Node, session: &Session, font_size: f32) {
+    let line_count = session.active().line_count();
+    let digits = line_count.to_string().len().max(1);
+    let digit_str: String = std::iter::repeat('0').take(digits).collect();
+    let text_w = render::glyph_cache::measure_text_width(MONO_BYTES, &digit_str, font_size);
+    // Content width of sidebar = text width. CSS padding (16 left + 8 right) adds 24px.
+    // Total border-box width = text_w + 24. Editor padding-left must match that total.
+    let sidebar_content_w = text_w;
+    let sidebar_total_w = sidebar_content_w + 24.0; // 16px pad-left + 8px pad-right
+
+    if let Some(ln) = root.get_element_by_id("line-numbers") {
+        ln.style.width = render::style::Length::Px(sidebar_content_w);
+    }
+    if let Some(editor) = root.get_element_by_id("editor") {
+        editor.style.padding.left = render::style::Length::Px(sidebar_total_w);
+    }
+}
+
 /// Height of the editor content area (inside padding) — equals the scrollbar track height.
 pub fn editor_content_height(window_h: f32) -> f32 {
     // toolbar 32 + tab-bar 28 + statusbar 24 = 84px fixed chrome; editor padding 16px top+bottom
@@ -686,7 +705,7 @@ pub fn rebuild_highlight_cache(cache: &mut std::collections::HashMap<i64, Vec<Ve
     cache.insert(buf.id, lines);
 }
 
-fn update_editor_node(root: &mut Node, session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>, max_lines: usize) {
+fn update_editor_node(root: &mut Node, session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>, max_lines: usize, last_layout: Option<&LayoutBox>) {
     let buf = session.active();
     let cursor = buf.cursor;
     let scroll = buf.scroll_line;
@@ -694,7 +713,34 @@ fn update_editor_node(root: &mut Node, session: &Session, cache: &std::collectio
     let lines = cache.get(&buf.id).unwrap_or(&empty_cache);
     let Some(editor) = root.get_element_by_id("editor") else { return };
     editor.clear_children();
-    for i in scroll..(scroll + max_lines).min(buf.line_count()) {
+
+    // Get previous layout's text line boxes to count visual rows per logical line.
+    // editor child[0] = line-numbers (abs), child[1..n-1] = text lines, last = scrollbar (abs).
+    let prev_editor_lb = last_layout.and_then(|lb| lb.children.get(2));
+
+    let end_line = (scroll + max_lines).min(buf.line_count());
+    let mut line_nums = Node::element("div").with_class("line-numbers").with_id("line-numbers");
+    for (layout_idx, i) in (scroll..end_line).enumerate() {
+        line_nums = line_nums.with_child(
+            Node::element("div").with_class("line-number").with_child(Node::text((i + 1).to_string()))
+        );
+        // Add blank spans for any extra visual rows this line wraps into.
+        let extra_rows = prev_editor_lb
+            .and_then(|elb| elb.children.get(layout_idx + 1)) // +1 for line-numbers placeholder
+            .map(|line_lb| {
+                let span_count = lines.get(i).map_or(1, |v| v.len().max(1));
+                visual_rows_for_line(line_lb, span_count).len().saturating_sub(1)
+            })
+            .unwrap_or(0);
+        for _ in 0..extra_rows {
+            line_nums = line_nums.with_child(
+                Node::element("div").with_class("line-number").with_child(Node::text(" "))
+            );
+        }
+    }
+    editor.append_child(line_nums);
+
+    for i in scroll..end_line {
         let mut line_node = Node::element("div").with_class("line");
         if i == cursor.line { line_node = line_node.with_class("cursor-line"); }
         let tokens = lines.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
@@ -742,7 +788,7 @@ fn update_tab_bar_node(root: &mut Node, session: &Session) {
 
 // Public wrappers used by event handlers.
 fn update_editor(doc: &mut Document, session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>, max_lines: usize) {
-    update_editor_node(&mut doc.root, session, cache, max_lines);
+    update_editor_node(&mut doc.root, session, cache, max_lines, None);
     doc.mark_dirty();
 }
 
@@ -751,9 +797,9 @@ fn update_statusbar(doc: &mut Document, session: &Session) {
     doc.mark_dirty();
 }
 
-fn sync_doc_to_session(doc: &mut Document, session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>, max_lines: usize) {
+fn sync_doc_to_session(doc: &mut Document, session: &Session, cache: &std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>, max_lines: usize, last_layout: Option<&LayoutBox>) {
     update_tab_bar_node(&mut doc.root, session);
-    update_editor_node(&mut doc.root, session, cache, max_lines);
+    update_editor_node(&mut doc.root, session, cache, max_lines, last_layout);
     update_statusbar_node(&mut doc.root, session);
     doc.mark_dirty();
 }
@@ -813,15 +859,17 @@ pub fn render_frame(
     femtovg_fonts: Option<(FontId, FontId)>,
     hint: bool,
     use_femtovg: bool,
+    last_layout: Option<&LayoutBox>,
 ) -> LayoutBox {
     let editor_h = editor_content_height(h);
-    sync_doc_to_session(doc, session, highlight_cache, visible_lines(editor_h, font_size) + 1);
+    sync_doc_to_session(doc, session, highlight_cache, visible_lines(editor_h, font_size) + 1, last_layout);
 
     canvas.set_size(w as u32, h as u32, scale);
     canvas.clear_rect(0, 0, w as u32, h as u32, femtovg::Color::rgbf(0.15, 0.15, 0.18));
 
     apply_styles(&mut doc.root, sheet, &[], None);
     update_scrollbar_styles(&mut doc.root, session, editor_h, font_size);
+    update_line_numbers_styles(&mut doc.root, session, font_size);
 
     let mut measurer = render::femtovg_measurer::SwashMeasurer {
         sans_data: SANS_BYTES,
