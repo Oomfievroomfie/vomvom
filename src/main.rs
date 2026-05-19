@@ -1,5 +1,6 @@
 mod highlight;
 mod render;
+mod replay;
 mod screenshot;
 mod session;
 
@@ -751,7 +752,7 @@ fn visible_lines(editor_content_h: f32, font_size: f32) -> usize {
 }
 
 // Scroll so the cursor line is visible, given the editor's pixel height.
-fn scroll_to_cursor(session: &mut Session, editor_h: f32, font_size: f32) {
+pub fn scroll_to_cursor(session: &mut Session, editor_h: f32, font_size: f32) {
     let visible_lines = visible_lines(editor_h, font_size);
     let buf = session.active_mut();
     let cursor_line = buf.cursor.line;
@@ -886,7 +887,7 @@ fn sync_doc_to_session(doc: &mut Document, session: &Session, cache: &std::colle
 
 // --- Menu open/close (mutates the retained document) ---
 
-fn any_menu_open(doc: &Document) -> bool {
+pub fn any_menu_open(doc: &Document) -> bool {
     for id in ["menu-file", "menu-edit"] {
         if let Some(n) = doc.root.get_element_by_id_ref(id) {
             if n.has_class("open") { return true; }
@@ -895,7 +896,7 @@ fn any_menu_open(doc: &Document) -> bool {
     false
 }
 
-fn open_menu(doc: &mut Document, menu_id: &str) {
+pub fn open_menu(doc: &mut Document, menu_id: &str) {
     // Close any other open menus first.
     close_all_menus(doc);
     let node_id = format!("menu-{}", menu_id);
@@ -907,7 +908,7 @@ fn open_menu(doc: &mut Document, menu_id: &str) {
     doc.mark_dirty();
 }
 
-fn close_all_menus(doc: &mut Document) {
+pub fn close_all_menus(doc: &mut Document) {
     for id in ["menu-file", "menu-edit"] {
         if let Some(header) = doc.get_element_by_id(id) {
             if header.has_class("open") {
@@ -1011,6 +1012,13 @@ fn main() {
         return;
     }
 
+    if let Some(pos) = args.iter().position(|a| a == "--replay") {
+        args.remove(pos);
+        let script = args.get(0).map(|s| s.as_str()).unwrap_or("close-tab");
+        run_replay_script(script);
+        return;
+    }
+
     let db_path = std::env::var("VOMVOM_DB")
         .unwrap_or_else(|_| {
             let mut p = dirs_or_local();
@@ -1032,7 +1040,7 @@ fn build_dropdown(menu_id: &str) -> Node {
     parse_html(src).into_iter().next().unwrap_or_else(|| Node::element("div").with_class("dropdown"))
 }
 
-fn execute_menu_action(action: &str, session: &mut Session) {
+pub fn execute_menu_action(action: &str, session: &mut Session) {
     eprintln!("[menu] execute_menu_action: {:?}", action);
     match action {
         "open" => open_file_dialog(session),
@@ -1053,7 +1061,7 @@ fn execute_menu_action(action: &str, session: &mut Session) {
 
 // Walk toolbar menu headers by hit-testing their layout boxes, then reading
 // the "menu" attribute from the corresponding node to identify which menu.
-fn hit_test_menu_header(root: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<String> {
+pub fn hit_test_menu_header(root: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<String> {
     use render::tree::NodeContent;
     let toolbar_lb = lb.children.first()?;
     let toolbar_node = root.children().first()?;
@@ -1071,7 +1079,7 @@ fn hit_test_menu_header(root: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option
 }
 
 // Walk the open dropdown's items, returning the "action" attr of the hit item.
-fn hit_test_menu_item(root: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<String> {
+pub fn hit_test_menu_item(root: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<String> {
     use render::tree::NodeContent;
     let toolbar_lb = lb.children.first()?;
     let toolbar_node = root.children().first()?;
@@ -1104,7 +1112,7 @@ fn open_file_dialog(session: &mut Session) {
     }
 }
 
-fn hit_test_tab(root: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<usize> {
+pub fn hit_test_tab(root: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<usize> {
     use render::tree::NodeContent;
     let tab_bar_lb = lb.children.get(1)?;
     let tab_bar_node = root.children().get(1)?;
@@ -1335,7 +1343,7 @@ fn span_text_of<'a>(line_node: &'a Node, si: usize) -> &'a str {
 
 /// Paint selection highlight rectangles for a single (anchor, cursor) selection.
 /// sel_start and sel_end must be in document order (start <= end).
-fn paint_selection(
+pub fn paint_selection(
     canvas: &mut Canvas<OpenGl>,
     lb: &LayoutBox,
     doc_root: &Node,
@@ -1448,7 +1456,7 @@ fn x_for_col_on_row(
 }
 
 /// Paint cursor bars at the given (line, col, text) positions over the editor area.
-fn paint_cursors_with_text(
+pub fn paint_cursors_with_text(
     canvas: &mut Canvas<OpenGl>,
     lb: &LayoutBox,
     doc_root: &Node,
@@ -1526,7 +1534,7 @@ fn scrollbar_y_to_scroll(track_lb: &LayoutBox, session: &Session, my: f32, windo
 }
 
 /// Hit-test a mouse click in the editor area; return (line, col).
-fn hit_test_editor(
+pub fn hit_test_editor(
     canvas: &mut Canvas<OpenGl>,
     lb: &LayoutBox,
     doc_root: &Node,
@@ -1639,6 +1647,38 @@ fn hit_test_editor(
     }
 
     Some((buf_line, best_col))
+}
+
+fn run_replay_script(script: &str) {
+    use replay::ScriptedEvent::*;
+    match script {
+        "close-tab" => {
+            // Debug script: open File menu, click "Close Tab", verify tab count drops.
+            replay::run_script("close_tab", 1024, 768, vec![
+                // Initial state: show the demo scene.
+                ScreenshotNamed("initial"),
+                // Click the File menu header (approximately x=30, y=16 based on toolbar layout).
+                ClickAt(30.0, 16.0),
+                ScreenshotNamed("menu_open"),
+                // Click "Close Tab" item — 4th item (Open/Save/separator/Close Tab).
+                // From debug output: items at y≈26, 56, ~86(sep), ~110. Use y=115.
+                ClickAt(30.0, 115.0),
+                ScreenshotNamed("after_close"),
+            ]);
+        }
+        "type-text" => {
+            replay::run_script("type_text", 1024, 768, vec![
+                ScreenshotNamed("initial"),
+                Type("hello, world!\n"),
+                ScreenshotNamed("after_type"),
+                MoveCursor(0, 0),
+                ScreenshotNamed("cursor_home"),
+            ]);
+        }
+        _ => {
+            eprintln!("[replay] unknown script {:?}. Available: close-tab, type-text", script);
+        }
+    }
 }
 
 fn dirs_or_local() -> std::path::PathBuf {
