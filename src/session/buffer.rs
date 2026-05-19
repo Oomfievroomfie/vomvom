@@ -31,6 +31,9 @@ pub struct Buffer {
     pub path: Option<String>,
     rope: Rope,
     pub cursor: Pos,
+    /// Selection anchor. When Some, the selection spans (anchor, cursor) in document order.
+    /// Each future cursor in a multicursor setup would carry its own anchor.
+    pub anchor: Option<Pos>,
     pub scroll_line: usize,
     pub is_modified: bool,
     pub dirty: bool,
@@ -56,6 +59,7 @@ impl Buffer {
             path,
             rope: Rope::from_str(content),
             cursor: Pos::default(),
+            anchor: None,
             scroll_line: 0,
             is_modified: false,
             dirty: false,
@@ -169,6 +173,7 @@ impl Buffer {
     }
 
     pub fn insert(&mut self, text: &str) {
+        self.delete_selection();
         let start = self.cursor;
         self.apply_insert(start, text);
         self.truncate_redo();
@@ -192,6 +197,7 @@ impl Buffer {
     }
 
     pub fn backspace(&mut self) {
+        if self.delete_selection() { return; }
         if self.cursor == Pos::default() { return; }
         let end = self.cursor;
         let start = self.prev_pos(end);
@@ -217,6 +223,7 @@ impl Buffer {
     }
 
     pub fn delete_forward(&mut self) {
+        if self.delete_selection() { return; }
         let start = self.cursor;
         let end = self.next_pos(start);
         if start == end { return; }
@@ -317,6 +324,60 @@ impl Buffer {
         self.break_undo_group();
         self.dirty = true;
         true
+    }
+
+    /// Returns (start, end) of the current selection in document order, or None if no selection.
+    pub fn selection_range(&self) -> Option<(Pos, Pos)> {
+        let anchor = self.anchor?;
+        if anchor == self.cursor { return None; }
+        if anchor < self.cursor { Some((anchor, self.cursor)) } else { Some((self.cursor, anchor)) }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.anchor = None;
+    }
+
+    /// Set anchor to current cursor position only if no selection is active.
+    pub fn set_anchor_if_none(&mut self) {
+        if self.anchor.is_none() {
+            self.anchor = Some(self.cursor);
+        }
+    }
+
+    /// If there is an active selection, delete it and return true.
+    pub fn delete_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selection_range() else { return false };
+        let sc = self.pos_to_char(start);
+        let ec = self.pos_to_char(end);
+        let deleted: String = self.rope.chars_at(sc).take(ec - sc).collect();
+        self.apply_delete(start, end);
+        self.truncate_redo();
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        let group_id = self.current_group(EditKind::DeleteForward, &deleted);
+        self.ops.push(crate::session::db::UndoOp {
+            seq,
+            kind: crate::session::db::OpKind::Delete,
+            line_start: start.line as i64,
+            col_start: start.col as i64,
+            line_end: end.line as i64,
+            col_end: end.col as i64,
+            text: deleted,
+            group_id,
+        });
+        self.undo_head = Some(self.ops.len() - 1);
+        self.is_modified = true;
+        self.dirty = true;
+        self.anchor = None;
+        true
+    }
+
+    /// Selected text as a String, or empty string if no selection.
+    pub fn selected_text(&self) -> String {
+        let Some((start, end)) = self.selection_range() else { return String::new() };
+        let sc = self.pos_to_char(start);
+        let ec = self.pos_to_char(end);
+        self.rope.chars_at(sc).take(ec - sc).collect()
     }
 
     pub fn move_cursor(&mut self, line: usize, col: usize) {
@@ -426,6 +487,7 @@ impl Buffer {
     }
 
     pub fn backspace_word(&mut self) {
+        if self.delete_selection() { return; }
         let end = self.cursor;
         let start = self.word_start_left(end);
         if start == end { return; }
@@ -453,6 +515,7 @@ impl Buffer {
     }
 
     pub fn delete_forward_word(&mut self) {
+        if self.delete_selection() { return; }
         let start = self.cursor;
         let end = self.word_end_right(start);
         if start == end { return; }

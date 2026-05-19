@@ -18,6 +18,7 @@ swash = "0.2.7"
 imgref = "1.12.1"
 rgb = "0.8.53"
 zeno = "0.3.3"
+arboard = "3"
 
 [profile.release]
 opt-level = 1

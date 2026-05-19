@@ -28,6 +28,14 @@ Rust programming text editor. Two core systems:
 
 `layout()` returns local-space boxes (relative to parent content origin). `finalize_positions()` walks the tree and translates to absolute screen coords — it uses `translate_one()` (single node only), NOT `translate()` (recursive). Getting this wrong causes double-offset bugs.
 
+## General
+
+No memories. Anything that would go in a memory file goes in CLAUDE.md instead.
+
+## Debugging
+
+Do not remove debug prints until the problem is confirmed fixed by actual testing. Compile does not mean correct.
+
 ## Style cascade
 
 `compute_style()` resets non-inherited props to defaults, then applies matching rules sorted by specificity then source order. `NodeDesc.classes` is a `HashSet<String>`.

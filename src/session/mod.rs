@@ -161,6 +161,38 @@ impl Session {
         Ok(())
     }
 
+    /// Close the active buffer, removing it from the session and DB.
+    /// Always ensures at least one buffer remains.
+    pub fn close_active(&mut self) -> rusqlite::Result<()> {
+        if self.buffers.len() <= 1 {
+            let id = if let Some(conn) = &self.conn {
+                let old_id = self.buffers[0].id;
+                db::set_active_buffer_id(conn, None)?;
+                db::delete_buffer(conn, old_id)?;
+                db::insert_buffer(conn, None, "")?
+            } else {
+                0
+            };
+            self.buffers = vec![Buffer::new(id, None, "")];
+            self.active_idx = 0;
+            return Ok(());
+        }
+
+        let id = self.buffers[self.active_idx].id;
+        if let Some(conn) = &self.conn {
+            db::set_active_buffer_id(conn, None)?;
+            db::delete_buffer(conn, id)?;
+        }
+        self.buffers.remove(self.active_idx);
+        if self.active_idx >= self.buffers.len() {
+            self.active_idx = self.buffers.len() - 1;
+        }
+        if self.active_idx >= self.buffers.len() {
+            self.active_idx = self.buffers.len() - 1;
+        }
+        Ok(())
+    }
+
     /// Write a file's content to disk and clear its modified flag.
     pub fn save_active(&mut self) -> std::io::Result<()> {
         let buf = self.active_mut();

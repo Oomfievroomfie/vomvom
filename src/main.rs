@@ -72,6 +72,7 @@ struct AppState {
     last_input: Option<Instant>,
     editor_font_size: f32,
     cursor_ideal_x: Option<f32>,
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl App {
@@ -177,6 +178,7 @@ impl ApplicationHandler for App {
             last_input: None,
             editor_font_size,
             cursor_ideal_x: None,
+            clipboard: arboard::Clipboard::new().ok(),
         });
     }
 
@@ -196,134 +198,202 @@ impl ApplicationHandler for App {
                 if event.state != ElementState::Pressed { return; }
                 use winit::keyboard::{Key, NamedKey};
                 let ctrl = state.modifiers.state().control_key();
+                let shift = state.modifiers.state().shift_key();
                 let key = event.logical_key.clone();
                 let mut dirty = true;
+                let mut recognized = true;
 
+                // First block: keys that need state borrow before getting buf.
                 match &key {
                     Key::Character(s) if ctrl && (s == "o" || s == "O") => {
                         open_file_dialog(&mut state.session);
                         state.highlight_dirty = true;
-                        state.needs_redraw = true;
-                        return;
+                        dirty = false;
                     }
                     Key::Character(s) if ctrl && (s == "s" || s == "S") => {
                         let _ = state.session.save_active();
-                        state.needs_redraw = true;
-                        return;
+                        dirty = false;
                     }
                     Key::Character(s) if ctrl && (s == "f" || s == "F") => {
                         state.use_femtovg = !state.use_femtovg;
-                        state.needs_redraw = true;
-                        return;
+                        dirty = false;
                     }
                     Key::Character(s) if ctrl && (s == "h" || s == "H") => {
                         state.hint = !state.hint;
                         state.glyph_cache = GlyphCache::new();
-                        state.needs_redraw = true;
-                        return;
+                        dirty = false;
                     }
                     Key::Character(s) if ctrl && (s == "d" || s == "D") => {
                         state.debug_boxes = !state.debug_boxes;
-                        state.needs_redraw = true;
-                        return;
+                        dirty = false;
                     }
-                    _ => {}
+                    Key::Character(s) if ctrl && (s == "c" || s == "C") => {
+                        let text = state.session.active().selected_text();
+                        if !text.is_empty() {
+                            if let Some(cb) = &mut state.clipboard { let _ = cb.set_text(text); }
+                        }
+                        dirty = false;
+                    }
+                    Key::Character(s) if ctrl && (s == "x" || s == "X") => {
+                        let text = state.session.active().selected_text();
+                        if !text.is_empty() {
+                            if let Some(cb) = &mut state.clipboard { let _ = cb.set_text(text); }
+                            state.session.active_mut().delete_selection();
+                            state.highlight_dirty = true;
+                        }
+                        dirty = false;
+                    }
+                    Key::Character(s) if ctrl && (s == "v" || s == "V") => {
+                        let text = state.clipboard.as_mut().and_then(|cb| cb.get_text().ok());
+                        if let Some(text) = text {
+                            state.session.active_mut().insert(&text);
+                            state.highlight_dirty = true;
+                        }
+                        dirty = false;
+                    }
+                    Key::Named(NamedKey::Escape) => {
+                        state.session.active_mut().clear_selection();
+                        close_all_menus(&mut state.doc);
+                        dirty = false;
+                    }
+                    _ => { recognized = false; }
                 }
 
-                let buf = state.session.active_mut();
-                match &key {
-                    Key::Named(NamedKey::Escape) => {
-                        close_all_menus(&mut state.doc);
-                        state.needs_redraw = true;
-                        return;
-                    }
-                    Key::Character(s) if ctrl && (s == "z" || s == "Z") => { buf.undo(); state.highlight_dirty = true; }
-                    Key::Character(s) if ctrl && (s == "y" || s == "Y") => { buf.redo(); state.highlight_dirty = true; }
-                    Key::Named(NamedKey::Backspace) if ctrl => { buf.backspace_word(); state.highlight_dirty = true; }
-                    Key::Named(NamedKey::Backspace) => { buf.backspace(); state.highlight_dirty = true; }
-                    Key::Named(NamedKey::Delete) if ctrl => { buf.delete_forward_word(); state.highlight_dirty = true; }
-                    Key::Named(NamedKey::Delete) => { buf.delete_forward(); state.highlight_dirty = true; }
-                    Key::Named(NamedKey::Enter) => { buf.insert("\n"); state.highlight_dirty = true; }
-                    Key::Named(NamedKey::Space) => { buf.insert(" "); state.highlight_dirty = true; }
-                    Key::Named(NamedKey::Tab) => { buf.insert("    "); state.highlight_dirty = true; }
-                    Key::Named(NamedKey::ArrowLeft) if ctrl => {
-                        let pos = buf.word_start_left(buf.cursor);
-                        buf.move_cursor(pos.line, pos.col);
-                        state.cursor_ideal_x = None;
-                        buf.break_undo_group();
-                    }
-                    Key::Named(NamedKey::ArrowLeft) => {
-                        let pos = buf.cursor;
-                        let (l, c) = if pos.col > 0 { (pos.line, pos.col - 1) } else if pos.line > 0 { (pos.line - 1, buf.line(pos.line - 1).chars().count()) } else { (0, 0) };
-                        buf.move_cursor(l, c);
-                        state.cursor_ideal_x = None;
-                        buf.break_undo_group();
-                    }
-                    Key::Named(NamedKey::ArrowRight) if ctrl => {
-                        let pos = buf.word_end_right(buf.cursor);
-                        buf.move_cursor(pos.line, pos.col);
-                        state.cursor_ideal_x = None;
-                        buf.break_undo_group();
-                    }
-                    Key::Named(NamedKey::ArrowRight) => {
-                        let pos = buf.cursor;
-                        let line_len = buf.line(pos.line).chars().count();
-                        let (l, c) = if pos.col < line_len { (pos.line, pos.col + 1) } else if pos.line + 1 < buf.line_count() { (pos.line + 1, 0) } else { (pos.line, pos.col) };
-                        buf.move_cursor(l, c);
-                        state.cursor_ideal_x = None;
-                        buf.break_undo_group();
-                    }
-                    Key::Named(NamedKey::ArrowUp) => {
-                        let pos = buf.cursor;
-                        let scroll = buf.scroll_line;
-                        let mono_font = state.femtovg_fonts.filter(|_| state.use_femtovg).map(|(_, m)| m);
-                        let line_count = buf.line_count();
-                        // Establish ideal_x from current cursor position if not already set.
-                        if state.cursor_ideal_x.is_none() {
-                            if let Some(x) = compute_cursor_x(&mut state.canvas, &state.last_layout, &state.doc.root, pos.line, pos.col, scroll, mono_font, MONO_BYTES, state.editor_font_size) {
-                                state.cursor_ideal_x = Some(x);
-                            }
+                if !recognized {
+                    recognized = true;
+                    let buf = state.session.active_mut();
+                    match &key {
+                        Key::Character(s) if ctrl && (s == "z" || s == "Z") => {
+                            buf.clear_selection();
+                            buf.undo();
+                            state.highlight_dirty = true;
                         }
-                        let ideal_x = state.cursor_ideal_x.unwrap_or(0.0);
-                        let (new_line, new_col) = move_cursor_vertical(&mut state.canvas, &state.last_layout, &state.doc.root, pos.line, pos.col, scroll, line_count, -1, ideal_x, mono_font, MONO_BYTES, state.editor_font_size);
-                        buf.move_cursor(new_line, new_col);
-                        buf.break_undo_group();
-                    }
-                    Key::Named(NamedKey::ArrowDown) => {
-                        let pos = buf.cursor;
-                        let scroll = buf.scroll_line;
-                        let mono_font = state.femtovg_fonts.filter(|_| state.use_femtovg).map(|(_, m)| m);
-                        let line_count = buf.line_count();
-                        if state.cursor_ideal_x.is_none() {
-                            if let Some(x) = compute_cursor_x(&mut state.canvas, &state.last_layout, &state.doc.root, pos.line, pos.col, scroll, mono_font, MONO_BYTES, state.editor_font_size) {
-                                state.cursor_ideal_x = Some(x);
-                            }
+                        Key::Character(s) if ctrl && (s == "y" || s == "Y") => {
+                            buf.clear_selection();
+                            buf.redo();
+                            state.highlight_dirty = true;
                         }
-                        let ideal_x = state.cursor_ideal_x.unwrap_or(0.0);
-                        let (new_line, new_col) = move_cursor_vertical(&mut state.canvas, &state.last_layout, &state.doc.root, pos.line, pos.col, scroll, line_count, 1, ideal_x, mono_font, MONO_BYTES, state.editor_font_size);
-                        buf.move_cursor(new_line, new_col);
-                        buf.break_undo_group();
+                        Key::Named(NamedKey::Backspace) if ctrl => { buf.backspace_word(); state.highlight_dirty = true; }
+                        Key::Named(NamedKey::Backspace) => { buf.backspace(); state.highlight_dirty = true; }
+                        Key::Named(NamedKey::Delete) if ctrl => { buf.delete_forward_word(); state.highlight_dirty = true; }
+                        Key::Named(NamedKey::Delete) => { buf.delete_forward(); state.highlight_dirty = true; }
+                        Key::Named(NamedKey::Enter) => { buf.insert("\n"); state.highlight_dirty = true; }
+                        Key::Named(NamedKey::Space) => { buf.insert(" "); state.highlight_dirty = true; }
+                        Key::Named(NamedKey::Tab) => { buf.insert("    "); state.highlight_dirty = true; }
+                        Key::Named(NamedKey::ArrowLeft) if ctrl => {
+                            if shift { buf.set_anchor_if_none(); } else { buf.clear_selection(); }
+                            let pos = buf.word_start_left(buf.cursor);
+                            buf.move_cursor(pos.line, pos.col);
+                            state.cursor_ideal_x = None;
+                            buf.break_undo_group();
+                        }
+                        Key::Named(NamedKey::ArrowLeft) => {
+                            if shift {
+                                buf.set_anchor_if_none();
+                                let pos = buf.cursor;
+                                let (l, c) = if pos.col > 0 { (pos.line, pos.col - 1) } else if pos.line > 0 { (pos.line - 1, buf.line(pos.line - 1).chars().count()) } else { (0, 0) };
+                                buf.move_cursor(l, c);
+                            } else if buf.selection_range().is_some() {
+                                let (start, _) = buf.selection_range().unwrap();
+                                buf.clear_selection();
+                                buf.move_cursor(start.line, start.col);
+                            } else {
+                                let pos = buf.cursor;
+                                let (l, c) = if pos.col > 0 { (pos.line, pos.col - 1) } else if pos.line > 0 { (pos.line - 1, buf.line(pos.line - 1).chars().count()) } else { (0, 0) };
+                                buf.move_cursor(l, c);
+                            }
+                            state.cursor_ideal_x = None;
+                            buf.break_undo_group();
+                        }
+                        Key::Named(NamedKey::ArrowRight) if ctrl => {
+                            if shift { buf.set_anchor_if_none(); } else { buf.clear_selection(); }
+                            let pos = buf.word_end_right(buf.cursor);
+                            buf.move_cursor(pos.line, pos.col);
+                            state.cursor_ideal_x = None;
+                            buf.break_undo_group();
+                        }
+                        Key::Named(NamedKey::ArrowRight) => {
+                            if shift {
+                                buf.set_anchor_if_none();
+                                let pos = buf.cursor;
+                                let line_len = buf.line(pos.line).chars().count();
+                                let (l, c) = if pos.col < line_len { (pos.line, pos.col + 1) } else if pos.line + 1 < buf.line_count() { (pos.line + 1, 0) } else { (pos.line, pos.col) };
+                                buf.move_cursor(l, c);
+                            } else if buf.selection_range().is_some() {
+                                let (_, end) = buf.selection_range().unwrap();
+                                buf.clear_selection();
+                                buf.move_cursor(end.line, end.col);
+                            } else {
+                                let pos = buf.cursor;
+                                let line_len = buf.line(pos.line).chars().count();
+                                let (l, c) = if pos.col < line_len { (pos.line, pos.col + 1) } else if pos.line + 1 < buf.line_count() { (pos.line + 1, 0) } else { (pos.line, pos.col) };
+                                buf.move_cursor(l, c);
+                            }
+                            state.cursor_ideal_x = None;
+                            buf.break_undo_group();
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            if shift { buf.set_anchor_if_none(); } else { buf.clear_selection(); }
+                            let pos = buf.cursor;
+                            let scroll = buf.scroll_line;
+                            let mono_font = state.femtovg_fonts.filter(|_| state.use_femtovg).map(|(_, m)| m);
+                            let line_count = buf.line_count();
+                            if state.cursor_ideal_x.is_none() {
+                                if let Some(x) = compute_cursor_x(&mut state.canvas, &state.last_layout, &state.doc.root, pos.line, pos.col, scroll, mono_font, MONO_BYTES, state.editor_font_size) {
+                                    state.cursor_ideal_x = Some(x);
+                                }
+                            }
+                            let ideal_x = state.cursor_ideal_x.unwrap_or(0.0);
+                            let (new_line, new_col) = move_cursor_vertical(&mut state.canvas, &state.last_layout, &state.doc.root, pos.line, pos.col, scroll, line_count, -1, ideal_x, mono_font, MONO_BYTES, state.editor_font_size);
+                            buf.move_cursor(new_line, new_col);
+                            buf.break_undo_group();
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            if shift { buf.set_anchor_if_none(); } else { buf.clear_selection(); }
+                            let pos = buf.cursor;
+                            let scroll = buf.scroll_line;
+                            let mono_font = state.femtovg_fonts.filter(|_| state.use_femtovg).map(|(_, m)| m);
+                            let line_count = buf.line_count();
+                            if state.cursor_ideal_x.is_none() {
+                                if let Some(x) = compute_cursor_x(&mut state.canvas, &state.last_layout, &state.doc.root, pos.line, pos.col, scroll, mono_font, MONO_BYTES, state.editor_font_size) {
+                                    state.cursor_ideal_x = Some(x);
+                                }
+                            }
+                            let ideal_x = state.cursor_ideal_x.unwrap_or(0.0);
+                            let (new_line, new_col) = move_cursor_vertical(&mut state.canvas, &state.last_layout, &state.doc.root, pos.line, pos.col, scroll, line_count, 1, ideal_x, mono_font, MONO_BYTES, state.editor_font_size);
+                            buf.move_cursor(new_line, new_col);
+                            buf.break_undo_group();
+                        }
+                        Key::Named(NamedKey::Home) => {
+                            if shift { buf.set_anchor_if_none(); } else { buf.clear_selection(); }
+                            let line = buf.cursor.line;
+                            buf.move_cursor(line, 0);
+                            state.cursor_ideal_x = None;
+                            buf.break_undo_group();
+                        }
+                        Key::Named(NamedKey::End) => {
+                            if shift { buf.set_anchor_if_none(); } else { buf.clear_selection(); }
+                            let line = buf.cursor.line;
+                            let len = buf.line(line).chars().count();
+                            buf.move_cursor(line, len);
+                            state.cursor_ideal_x = None;
+                            buf.break_undo_group();
+                        }
+                        Key::Character(s) if !ctrl => {
+                            buf.insert(s);
+                            state.highlight_dirty = true;
+                            state.cursor_ideal_x = None;
+                        }
+                        _ => { dirty = false; recognized = false; }
                     }
-                    Key::Named(NamedKey::Home) => {
-                        let line = buf.cursor.line;
-                        buf.move_cursor(line, 0);
-                        state.cursor_ideal_x = None;
-                        buf.break_undo_group();
-                    }
-                    Key::Named(NamedKey::End) => {
-                        let line = buf.cursor.line;
-                        let len = buf.line(line).chars().count();
-                        buf.move_cursor(line, len);
-                        state.cursor_ideal_x = None;
-                        buf.break_undo_group();
-                    }
-                    Key::Character(s) if !ctrl => { buf.insert(s); state.highlight_dirty = true; state.cursor_ideal_x = None; }
-                    _ => { dirty = false; }
+                }
+
+                if recognized {
+                    state.needs_redraw = true;
                 }
                 if dirty {
                     let editor_h = editor_content_height(state.window.inner_size().height as f32);
                     scroll_to_cursor(&mut state.session, editor_h, state.editor_font_size);
-                    state.needs_redraw = true;
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -353,7 +423,9 @@ impl ApplicationHandler for App {
                 let (mx, my) = state.mouse_pos;
                 if let Some(ref lb) = state.last_layout.clone() {
                     if any_menu_open(&state.doc) {
+                        eprintln!("[click] menu open, hit testing at ({}, {})", mx, my);
                         if let Some(action) = hit_test_menu_item(&state.doc.root, lb, mx, my) {
+                            eprintln!("[click] hit action: {:?}", action);
                             close_all_menus(&mut state.doc);
                             execute_menu_action(&action, &mut state.session);
                             state.highlight_dirty = true;
@@ -386,7 +458,13 @@ impl ApplicationHandler for App {
                         let mono_font = state.femtovg_fonts.filter(|_| state.use_femtovg).map(|(_, m)| m);
                         hit_test_editor(&mut state.canvas, lb, &state.doc.root, &state.session, mx, my, MONO_BYTES, mono_font, state.editor_font_size)
                     } {
+                        let shift = state.modifiers.state().shift_key();
                         let buf = state.session.active_mut();
+                        if shift {
+                            buf.set_anchor_if_none();
+                        } else {
+                            buf.clear_selection();
+                        }
                         buf.move_cursor(line, col);
                         buf.break_undo_group();
                         state.cursor_ideal_x = None;
@@ -479,11 +557,16 @@ impl ApplicationHandler for App {
 
                 let buf = state.session.active();
                 let scroll = buf.scroll_line;
+                let mono_font = state.femtovg_fonts.filter(|_| state.use_femtovg).map(|(_, m)| m);
+
+                if let Some((sel_start, sel_end)) = buf.selection_range() {
+                    paint_selection(&mut state.canvas, &lb, &state.doc.root, sel_start, sel_end, scroll, MONO_BYTES, mono_font, state.editor_font_size);
+                }
+
                 if buf.cursor.line >= scroll {
                     let line_text = buf.line(buf.cursor.line);
                     let layout_line = buf.cursor.line - scroll;
                     let cursors = vec![(layout_line, buf.cursor.col, line_text.as_str())];
-                    let mono_font = state.femtovg_fonts.filter(|_| state.use_femtovg).map(|(_, m)| m);
                     paint_cursors_with_text(&mut state.canvas, &lb, &state.doc.root, &cursors, MONO_BYTES, mono_font, state.editor_font_size);
                 }
 
@@ -950,13 +1033,21 @@ fn build_dropdown(menu_id: &str) -> Node {
 }
 
 fn execute_menu_action(action: &str, session: &mut Session) {
+    eprintln!("[menu] execute_menu_action: {:?}", action);
     match action {
         "open" => open_file_dialog(session),
         "save" => { let _ = session.save_active(); }
         "undo" => { session.active_mut().undo(); }
         "redo" => { session.active_mut().redo(); }
-        "close-tab" => { /* TODO */ }
-        _ => {}
+        "close-tab" => {
+            eprintln!("[menu] close-tab: buffers before = {}, active_idx = {}", session.buffers.len(), session.active_idx);
+            match session.close_active() {
+                Ok(()) => {}
+                Err(e) => eprintln!("[menu] close-tab ERROR: {:?}", e),
+            }
+            eprintln!("[menu] close-tab: buffers after = {}, active_idx = {}", session.buffers.len(), session.active_idx);
+        }
+        _ => { eprintln!("[menu] unhandled action: {:?}", action); }
     }
 }
 
@@ -990,6 +1081,7 @@ fn hit_test_menu_item(root: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<S
         if !dropdown_node.has_class("dropdown") { continue; }
         let dropdown_lb = header_lb.children.last()?;
         for (j, item_lb) in dropdown_lb.children.iter().enumerate() {
+            eprintln!("[hit_test_menu_item] item {} bbox={:?} vs ({},{})", j, item_lb.border_box, mx, my);
             if item_lb.border_box.contains(mx, my) {
                 let item_node = &dropdown_node.children()[j];
                 if let NodeContent::Element { attrs, .. } = &item_node.content {
@@ -1239,6 +1331,120 @@ fn span_text_of<'a>(line_node: &'a Node, si: usize) -> &'a str {
         .and_then(|span| span.children().first())
         .and_then(|n| if let render::tree::NodeContent::Text(t) = &n.content { Some(t.as_str()) } else { None })
         .unwrap_or("")
+}
+
+/// Paint selection highlight rectangles for a single (anchor, cursor) selection.
+/// sel_start and sel_end must be in document order (start <= end).
+fn paint_selection(
+    canvas: &mut Canvas<OpenGl>,
+    lb: &LayoutBox,
+    doc_root: &Node,
+    sel_start: session::buffer::Pos,
+    sel_end: session::buffer::Pos,
+    scroll: usize,
+    mono_data: &'static [u8],
+    mono_font: Option<FontId>,
+    font_size: f32,
+) {
+    let Some(editor_lb) = lb.children.get(2) else { return };
+    let Some(editor_node) = doc_root.children().get(2) else { return };
+    let sel_color = femtovg::Color::rgbaf(0.3, 0.5, 0.9, 0.35);
+    let line_h = font_size * 1.4;
+
+    // total text-line children: editor children[1..last-1]
+    let total_children = editor_lb.children.len();
+    if total_children < 2 { return; }
+
+    let first_visible_logical = scroll;
+    let last_visible_logical = scroll + (total_children - 2); // exclusive
+
+    let paint_start_logical = sel_start.line.max(first_visible_logical);
+    let paint_end_logical = sel_end.line.min(last_visible_logical.saturating_sub(1));
+    if paint_start_logical > paint_end_logical { return; }
+
+    for logical_line in paint_start_logical..=paint_end_logical {
+        let layout_idx = logical_line - scroll;
+        let Some(line_lb) = editor_lb.children.get(layout_idx + 1) else { continue };
+        let Some(line_node) = editor_node.children().get(layout_idx + 1) else { continue };
+
+        let span_count = line_node.children().len();
+        let rows = visual_rows_for_line(line_lb, span_count);
+        if rows.is_empty() { continue; }
+
+        // Determine which char range is selected on this logical line.
+        let line_char_len: usize = line_node.children().iter()
+            .map(|s| span_text_of_node(s))
+            .map(|t| t.chars().count())
+            .sum();
+
+        let col_start = if logical_line == sel_start.line { sel_start.col } else { 0 };
+        let col_end = if logical_line == sel_end.line { sel_end.col } else { line_char_len };
+
+        // Paint row by row within this logical line.
+        for row in &rows {
+            let row_base = char_base_for_row(line_node, row);
+            // Char length of this visual row.
+            let row_char_len: usize = row.iter().map(|&si| span_text_of(line_node, si).chars().count()).sum();
+            let row_end = row_base + row_char_len;
+
+            // Skip rows entirely outside the selection.
+            if col_end <= row_base || col_start >= row_end && logical_line == sel_end.line { continue; }
+            if col_start > row_end { continue; }
+
+            // x_left: pixel x of selection start on this row.
+            let row_sel_start = col_start.max(row_base);
+            let row_sel_end = col_end.min(row_end);
+
+            let x_left = x_for_col_on_row(canvas, line_lb, line_node, row, row_base, row_sel_start, mono_font, mono_data, font_size);
+            let x_right = if logical_line == sel_end.line && col_end <= row_end {
+                x_for_col_on_row(canvas, line_lb, line_node, row, row_base, row_sel_end, mono_font, mono_data, font_size)
+            } else {
+                // Selection continues past this row: extend to edge of editor content area.
+                editor_lb.content.x + editor_lb.content.w
+            };
+
+            if x_right <= x_left { continue; }
+            let row_y = row.first().and_then(|&si| line_lb.children.get(si)).map_or(line_lb.border_box.y, |s| s.border_box.y);
+            let mut path = Path::new();
+            path.rect(x_left, row_y, x_right - x_left, line_h);
+            canvas.fill_path(&path, &Paint::color(sel_color));
+        }
+    }
+}
+
+fn span_text_of_node(span: &Node) -> &str {
+    span.children().first()
+        .and_then(|n| if let render::tree::NodeContent::Text(t) = &n.content { Some(t.as_str()) } else { None })
+        .unwrap_or("")
+}
+
+/// Pixel x for a given char col on a specific visual row.
+fn x_for_col_on_row(
+    canvas: &mut Canvas<OpenGl>,
+    line_lb: &LayoutBox,
+    line_node: &Node,
+    row_spans: &[usize],
+    row_base: usize,
+    col: usize,
+    mono_font: Option<FontId>,
+    mono_data: &'static [u8],
+    font_size: f32,
+) -> f32 {
+    let mut char_offset = row_base;
+    for &si in row_spans {
+        let span_text = span_text_of(line_node, si);
+        let chars: Vec<char> = span_text.chars().collect();
+        let span_x = line_lb.children.get(si).map_or(0.0, |s| s.border_box.x);
+        if col <= char_offset + chars.len() {
+            let intra = col.saturating_sub(char_offset).min(chars.len());
+            let prefix: String = chars[..intra].iter().collect();
+            return span_x + text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
+        }
+        char_offset += chars.len();
+    }
+    // Past all spans: return right edge of last span
+    row_spans.last().and_then(|&si| line_lb.children.get(si))
+        .map_or(0.0, |s| s.border_box.x + s.border_box.w)
 }
 
 /// Paint cursor bars at the given (line, col, text) positions over the editor area.
