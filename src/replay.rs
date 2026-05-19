@@ -129,6 +129,7 @@ pub fn run_script(name: &str, width: u32, height: u32, events: Vec<ScriptedEvent
             }
             ScriptedEvent::MoveCursor(line, col) => {
                 state.session.active_mut().move_cursor(*line, *col);
+                state.do_render();
             }
             ScriptedEvent::MouseMove(x, y) => {
                 state.mouse_pos = (*x, *y);
@@ -190,6 +191,7 @@ pub fn run_script(name: &str, width: u32, height: u32, events: Vec<ScriptedEvent
                 state.session.active_mut().scroll_line = *line;
             }
             ScriptedEvent::Screenshot => {
+                state.do_render();
                 let (mx, my) = state.mouse_pos;
                 let (mut pixels, w, h) = state.capture_pixels();
                 paint_mouse_cursor_onto(&mut pixels, w, h, mx, my, &mut state.canvas);
@@ -198,6 +200,7 @@ pub fn run_script(name: &str, width: u32, height: u32, events: Vec<ScriptedEvent
                 shot_idx += 1;
             }
             ScriptedEvent::ScreenshotNamed(label) => {
+                state.do_render();
                 let (mx, my) = state.mouse_pos;
                 let (mut pixels, w, h) = state.capture_pixels();
                 paint_mouse_cursor_onto(&mut pixels, w, h, mx, my, &mut state.canvas);

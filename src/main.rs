@@ -1324,22 +1324,15 @@ pub fn hit_test_tab(root: &Node, lb: &LayoutBox, mx: f32, my: f32) -> Option<usi
 
 
 fn text_prefix_width(
-    canvas: &mut Canvas<OpenGl>,
-    mono_font: Option<FontId>,
+    _canvas: &mut Canvas<OpenGl>,
+    _mono_font: Option<FontId>,
     mono_data: &'static [u8],
     prefix: &str,
     font_size: f32,
 ) -> f32 {
-    if let Some(font_id) = mono_font {
-        let mut paint = Paint::color(femtovg::Color::black());
-        paint.set_font(&[font_id]);
-        paint.set_font_size(font_size);
-        canvas.measure_text(0.0, 0.0, prefix, &paint)
-            .map(|m| m.width())
-            .unwrap_or(0.0)
-    } else {
-        render::glyph_cache::measure_text_width(mono_data, prefix, font_size)
-    }
+    // Always use swash measurement so cursor positions agree with our render path,
+    // which applies rounded advances for fallback-font characters.
+    render::glyph_cache::measure_text_width(mono_data, prefix, font_size)
 }
 
 /// Return the pixel x of the cursor on its current visual row, or None if layout unavailable.
@@ -1937,8 +1930,12 @@ fn run_replay_script(script: &str) {
         "japanese-text" => {
             replay::run_script("japanese_text", 1024, 768, vec![
                 ScreenshotNamed("initial"),
-                Type("// Japanese: こんにちは世界\n// Mixed: hello 日本語 world\n// CJK: 日本語テスト\n// Align: ああああ\n// Align: 12345678\n"),
+                Type("// Japanese: こんにちは世界\n// Mixed: hello 日本語 world\n// CJK: 日本語テスト\n// Align: ああああ|\n// Align: 12345678|\n"),
                 ScreenshotNamed("after_type"),
+                MoveCursor(10, 9999), // end of "// Align: ああああ|"
+                ScreenshotNamed("cursor_end_of_jp"),
+                MoveCursor(11, 9999), // end of "// Align: 12345678|"
+                ScreenshotNamed("cursor_end_of_ascii"),
             ]);
         }
         _ => {
