@@ -22,6 +22,7 @@ arboard = "3"
 fontdb = "0.23.0"
 rustybuzz = "0.14"
 unicode-bidi = "0.3"
+unicode-linebreak = "0.1.5"
 
 [profile.release]
 opt-level = 1

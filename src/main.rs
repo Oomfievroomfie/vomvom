@@ -1119,10 +1119,12 @@ fn update_editor_node(root: &mut Node, session: &Session, cache: &std::collectio
             line_node = line_node.with_child(Node::text(" "));
         } else {
             for (tok_text, tok_class) in tokens {
-                let mut span = Node::element("span");
-                if !tok_class.is_empty() { span = span.with_class(*tok_class); }
-                span = span.with_child(Node::text(tok_text.clone()));
-                line_node = line_node.with_child(span);
+                for fragment in split_at_break_opportunities(tok_text) {
+                    let mut span = Node::element("span");
+                    if !tok_class.is_empty() { span = span.with_class(*tok_class); }
+                    span = span.with_child(Node::text(fragment));
+                    line_node = line_node.with_child(span);
+                }
             }
         }
         editor.append_child(line_node);
@@ -1697,6 +1699,26 @@ pub fn paint_selection(
             canvas.fill_path(&path, &Paint::color(sel_color));
         }
     }
+}
+
+/// Split a token string at Unicode line-break opportunities (UAX#14).
+/// Each fragment becomes its own span so flex-wrap can break the line there.
+/// Bidi is unaffected: each fragment is shaped independently.
+fn split_at_break_opportunities(text: &str) -> Vec<String> {
+    use unicode_linebreak::{linebreaks, BreakOpportunity};
+    let mut out = Vec::new();
+    let mut prev = 0usize;
+    for (pos, kind) in linebreaks(text) {
+        if matches!(kind, BreakOpportunity::Allowed | BreakOpportunity::Mandatory) {
+            if pos > prev {
+                out.push(text[prev..pos].to_string());
+            }
+            prev = pos;
+        }
+    }
+    if prev < text.len() { out.push(text[prev..].to_string()); }
+    if out.is_empty() { out.push(String::new()); }
+    out
 }
 
 fn span_text_of_node(span: &Node) -> &str {
