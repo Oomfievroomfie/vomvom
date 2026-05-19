@@ -50,16 +50,30 @@ impl<'a> PaintContext<'a> {
         };
         let atlas_f = crate::render::glyph_cache::ATLAS_SIZE as f32;
 
-        // Build span layout positions: border_box.x and border_box.y for each span.
-        // For wrapped lines each span has its own row position from layout.
+        // Build per-span layout boxes for Y position (visual row) and row-start X.
         let span_lbs: Vec<Option<&LayoutBox>> = (0..line_node.children().len())
             .map(|i| line_lb.children.get(i))
             .collect();
 
-        // Pen x is tracked per span: reset to 0 each time we enter a new span,
-        // and added to that span's layout x. This handles wrapped lines correctly.
-        let mut cur_si = usize::MAX;
-        let mut pen_x = 0.0_f32;
+        // For wrapped lines, group spans by visual row (same border_box.y).
+        // row_x[row_y] = absolute x of the left edge of that row.
+        let mut row_start_x: std::collections::HashMap<u32, f32> = std::collections::HashMap::new();
+        for slb_opt in &span_lbs {
+            if let Some(slb) = slb_opt {
+                let row_key = slb.border_box.y.to_bits();
+                row_start_x.entry(row_key).or_insert(slb.border_box.x);
+                // keep the minimum x as the row start
+                let e = row_start_x.get_mut(&row_key).unwrap();
+                if slb.border_box.x < *e { *e = slb.border_box.x; }
+            }
+        }
+
+        // pen_x advances purely from shaped advances. When a glyph moves to a new
+        // visual row (its span's y differs from the current row y), pen_x resets to
+        // that row's start x. Shaping is global so Arabic ligatures stay intact.
+        let mut pen_x = line_lb.children.first()
+            .map_or(line_lb.border_box.x, |s| s.border_box.x);
+        let mut cur_row_y_bits = line_lb.border_box.y.to_bits();
 
         for run in &runs {
             let font_data_for_run: &[u8] = run.font_bytes.as_deref()
@@ -70,21 +84,19 @@ impl<'a> PaintContext<'a> {
                 let abs_byte = run.text_range.start + g.cluster as usize;
                 let si = span_starts.partition_point(|&s| s <= abs_byte).saturating_sub(1).min(span_starts.len().saturating_sub(1));
 
-                // When crossing into a new span, reset pen to that span's layout x.
-                if si != cur_si {
-                    if let Some(Some(slb)) = span_lbs.get(si) {
-                        pen_x = slb.border_box.x;
-                    }
-                    cur_si = si;
+                let (span_x, span_y) = span_lbs.get(si).and_then(|s| *s)
+                    .map_or((line_lb.border_box.x, line_lb.border_box.y), |slb| (slb.border_box.x, slb.border_box.y));
+
+                // If this glyph is on a new visual row, reset pen to that row's left edge.
+                let row_key = span_y.to_bits();
+                if row_key != cur_row_y_bits {
+                    pen_x = *row_start_x.get(&row_key).unwrap_or(&span_x);
+                    cur_row_y_bits = row_key;
                 }
 
+                let baseline_y = span_y + font_size;
                 let color = span_colors.get(si).copied().unwrap_or(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
                 let tint = femtovg::Color::rgbaf(color.r, color.g, color.b, color.a);
-
-                // baseline_y is per-span since rows have different y positions.
-                let span_y = span_lbs.get(si).and_then(|s| *s)
-                    .map_or(line_lb.border_box.y, |slb| slb.border_box.y);
-                let baseline_y = span_y + font_size;
 
                 if let Some(cg) = self.glyph_cache.get_cached(g.glyph_id, run.font_index, font_size) {
                     if cg.width > 0 && cg.height > 0 {
