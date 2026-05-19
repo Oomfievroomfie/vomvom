@@ -69,6 +69,7 @@ struct AppState {
     ime_preedit: String,
     debug_boxes: bool,
     scrollbar_drag: bool,
+    editor_drag: bool,
     highlight_cache: std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>,
     last_input: Option<Instant>,
     editor_font_size: f32,
@@ -175,6 +176,7 @@ impl ApplicationHandler for App {
             ime_preedit: String::new(),
             debug_boxes: false,
             scrollbar_drag: false,
+            editor_drag: false,
             highlight_cache,
             last_input: None,
             editor_font_size,
@@ -400,8 +402,8 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 state.last_input = Some(Instant::now());
                 state.mouse_pos = (position.x as f32, position.y as f32);
+                let (mx, my) = state.mouse_pos;
                 if state.scrollbar_drag {
-                    let (mx, my) = state.mouse_pos;
                     let win_h = state.window.inner_size().height as f32;
                     if let Some(ref lb) = state.last_layout.clone() {
                         if let Some(track_lb) = scrollbar_track_lb(lb, mx, my)
@@ -413,11 +415,24 @@ impl ApplicationHandler for App {
                             state.needs_redraw = true;
                         }
                     }
+                } else if state.editor_drag {
+                    if let Some(ref lb) = state.last_layout.clone() {
+                        let mono_font = state.femtovg_fonts.filter(|_| state.use_femtovg).map(|(_, m)| m);
+                        if let Some((line, col)) = hit_test_editor(&mut state.canvas, lb, &state.doc.root, &state.session, mx, my, MONO_BYTES, mono_font, state.editor_font_size) {
+                            state.session.active_mut().move_cursor(line, col);
+                            state.cursor_ideal_x = None;
+                            let win_h = state.window.inner_size().height as f32;
+                            let editor_h = editor_content_height(win_h);
+                            scroll_to_cursor(&mut state.session, editor_h, state.editor_font_size);
+                            state.needs_redraw = true;
+                        }
+                    }
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: winit::event::MouseButton::Left, .. } => {
                 state.last_input = Some(Instant::now());
                 state.scrollbar_drag = false;
+                state.editor_drag = false;
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: winit::event::MouseButton::Left, .. } => {
                 state.last_input = Some(Instant::now());
@@ -465,10 +480,13 @@ impl ApplicationHandler for App {
                             buf.set_anchor_if_none();
                         } else {
                             buf.clear_selection();
+                            // Set anchor at click point so drag extends selection from here.
+                            buf.anchor = Some(session::buffer::Pos::new(line, col));
                         }
                         buf.move_cursor(line, col);
                         buf.break_undo_group();
                         state.cursor_ideal_x = None;
+                        state.editor_drag = true;
                         let editor_h = editor_content_height(win_h);
                         scroll_to_cursor(&mut state.session, editor_h, state.editor_font_size);
                         state.needs_redraw = true;
@@ -1675,8 +1693,16 @@ fn run_replay_script(script: &str) {
                 ScreenshotNamed("cursor_home"),
             ]);
         }
+        "drag-select" => {
+            replay::run_script("drag_select", 1024, 768, vec![
+                ScreenshotNamed("initial"),
+                // Drag from start of line 1 to end of line 3 in the demo content.
+                DragFrom(50.0, 84.0, 300.0, 140.0),
+                ScreenshotNamed("after_drag"),
+            ]);
+        }
         _ => {
-            eprintln!("[replay] unknown script {:?}. Available: close-tab, type-text", script);
+            eprintln!("[replay] unknown script {:?}. Available: close-tab, type-text, drag-select", script);
         }
     }
 }

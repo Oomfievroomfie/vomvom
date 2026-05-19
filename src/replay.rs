@@ -67,6 +67,9 @@ pub enum ScriptedEvent<'a> {
     ClickAt(f32, f32),
     /// Shift+click at (x, y).
     ShiftClickAt(f32, f32),
+    /// Click at (x, y) then drag to (x2, y2), simulating click-and-drag selection.
+    /// Takes intermediate steps as a list of waypoints between start and end.
+    DragFrom(f32, f32, f32, f32),
     /// Ctrl+Z undo.
     Undo,
     /// Ctrl+Y redo.
@@ -317,6 +320,19 @@ pub fn run_script(name: &str, width: u32, height: u32, events: Vec<ScriptedEvent
                 state.mouse_pos = (*x, *y);
                 handle_click(&mut state, *x, *y, true);
             }
+            ScriptedEvent::DragFrom(x1, y1, x2, y2) => {
+                // Click at start (sets anchor), then drag through midpoints to end.
+                state.mouse_pos = (*x1, *y1);
+                handle_click(&mut state, *x1, *y1, false);
+                // Move through a few interpolated steps so selection updates visibly.
+                for i in 1..=8 {
+                    let t = i as f32 / 8.0;
+                    let mx = x1 + (x2 - x1) * t;
+                    let my = y1 + (y2 - y1) * t;
+                    state.mouse_pos = (mx, my);
+                    handle_editor_drag(&mut state, mx, my);
+                }
+            }
             ScriptedEvent::Undo => {
                 state.session.active_mut().undo();
                 rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
@@ -392,9 +408,24 @@ fn handle_click(state: &mut ReplayState, mx: f32, my: f32, shift: bool) {
             buf.set_anchor_if_none();
         } else {
             buf.clear_selection();
+            buf.anchor = Some(crate::session::buffer::Pos::new(line, col));
         }
         buf.move_cursor(line, col);
         buf.break_undo_group();
+        let editor_h = editor_content_height(state.height as f32);
+        scroll_to_cursor(&mut state.session, editor_h, state.editor_font_size);
+    }
+}
+
+fn handle_editor_drag(state: &mut ReplayState, mx: f32, my: f32) {
+    let _ = state.render_to_pixels(None);
+    let Some(ref lb) = state.last_layout.clone() else { return };
+    let mono_font = state.femtovg_fonts.map(|(_, m)| m);
+    if let Some((line, col)) = hit_test_editor(
+        &mut state.canvas, lb, &state.doc.root, &state.session,
+        mx, my, MONO_BYTES, mono_font, state.editor_font_size,
+    ) {
+        state.session.active_mut().move_cursor(line, col);
         let editor_h = editor_content_height(state.height as f32);
         scroll_to_cursor(&mut state.session, editor_h, state.editor_font_size);
     }
