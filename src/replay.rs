@@ -53,6 +53,8 @@ pub enum ScriptedEvent<'a> {
     CloseMenus,
     /// Execute a menu action by name (without going through menu UI).
     MenuAction(&'a str),
+    /// Set the editor font size in pixels.
+    SetFontSize(f32),
     /// Scroll the active buffer to scroll_line.
     ScrollTo(usize),
     /// Save a screenshot at this point.  Files are named <prefix>_NNN.png.
@@ -186,6 +188,11 @@ pub fn run_script(name: &str, width: u32, height: u32, events: Vec<ScriptedEvent
                 close_all_menus(&mut state.doc);
                 execute_menu_action(action, &mut state.session);
                 rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
+            }
+            ScriptedEvent::SetFontSize(size) => {
+                state.editor_font_size = *size;
+                state.sheet = crate::build_stylesheet(*size);
+                state.do_render();
             }
             ScriptedEvent::ScrollTo(line) => {
                 state.session.active_mut().scroll_line = *line;

@@ -110,7 +110,7 @@ impl AppState {
             gl_context,
             glyph_cache: GlyphCache::new(),
             hint: true,
-            use_femtovg: true,
+            use_femtovg: false,
             femtovg_fonts: Some((sans_id, mono_id)),
             sheet,
             session,
@@ -1446,67 +1446,55 @@ fn visual_rows_for_line(line_lb: &LayoutBox, span_count: usize) -> Vec<Vec<usize
 
 /// Given a line node + lb + cursor col, return (visual_row_idx, x_pixel) for the cursor.
 fn cursor_visual_row_and_x(
-    canvas: &mut Canvas<OpenGl>,
+    _canvas: &mut Canvas<OpenGl>,
     line_lb: &LayoutBox,
     line_node: &Node,
     col: usize,
-    mono_font: Option<FontId>,
-    mono_data: &'static [u8],
+    _mono_font: Option<FontId>,
+    _mono_data: &'static [u8],
     font_size: f32,
 ) -> (usize, f32) {
     let span_count = line_node.children().len();
     let rows = visual_rows_for_line(line_lb, span_count);
 
+    let full_text = line_full_text(line_node);
+    let runs = shape_line_for_node(line_node, font_size);
+
+    // Find which span contains the col to determine visual row.
     let mut char_offset = 0usize;
+    let mut vrow = 0usize;
     for si in 0..span_count {
         let span_text = span_text_of(line_node, si);
         let span_chars = span_text.chars().count();
         if col <= char_offset + span_chars || si + 1 == span_count {
-            // Find which visual row this span is in.
-            let vrow = rows.iter().position(|r| r.contains(&si)).unwrap_or(0);
-            let intra = col.saturating_sub(char_offset).min(span_chars);
-            let prefix: String = span_text.chars().take(intra).collect();
-            let x_off = text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
-            let span_x = line_lb.children.get(si).map_or(0.0, |s| s.border_box.x);
-            return (vrow, span_x + x_off);
+            vrow = rows.iter().position(|r| r.contains(&si)).unwrap_or(0);
+            break;
         }
         char_offset += span_chars;
     }
-    (0, line_lb.content.x)
+
+    let line_origin_x = line_lb.children.first().map_or(line_lb.border_box.x, |s| s.border_box.x);
+    let x_rel = render::glyph_cache::col_to_x_in_shaped_line(&runs, col, &full_text);
+    (vrow, line_origin_x + x_rel)
 }
 
 /// Return col closest to target_x on a given visual row of a line.
 fn col_at_x_on_row(
-    canvas: &mut Canvas<OpenGl>,
+    _canvas: &mut Canvas<OpenGl>,
     line_lb: &LayoutBox,
     line_node: &Node,
-    row_spans: &[usize],
-    char_base_of_row: usize,
+    _row_spans: &[usize],
+    _char_base_of_row: usize,
     target_x: f32,
-    mono_font: Option<FontId>,
-    mono_data: &'static [u8],
+    _mono_font: Option<FontId>,
+    _mono_data: &'static [u8],
     font_size: f32,
 ) -> usize {
-    let mut best_col = char_base_of_row;
-    let mut best_dist = f32::INFINITY;
-    let mut char_offset = char_base_of_row;
-
-    for &si in row_spans {
-        let span_text = span_text_of(line_node, si);
-        let chars: Vec<char> = span_text.chars().collect();
-        let span_x = line_lb.children.get(si).map_or(0.0, |s| s.border_box.x);
-        for intra in 0..=chars.len() {
-            let prefix: String = chars[..intra].iter().collect();
-            let x = span_x + text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
-            let dist = (x - target_x).abs();
-            if dist < best_dist {
-                best_dist = dist;
-                best_col = char_offset + intra;
-            }
-        }
-        char_offset += chars.len();
-    }
-    best_col
+    let full_text = line_full_text(line_node);
+    let runs = shape_line_for_node(line_node, font_size);
+    let line_origin_x = line_lb.children.first().map_or(line_lb.border_box.x, |s| s.border_box.x);
+    let local_x = target_x - line_origin_x;
+    render::glyph_cache::x_to_col_in_shaped_line(&runs, local_x, &full_text)
 }
 
 /// Char offset of the first character on a given visual row.
@@ -1611,33 +1599,35 @@ fn span_text_of_node(span: &Node) -> &str {
         .unwrap_or("")
 }
 
+/// Build the full concatenated text for a line node.
+fn line_full_text(line_node: &Node) -> String {
+    line_node.children().iter().map(|s| span_text_of_node(s)).collect()
+}
+
+/// Shape the full line text and return the runs. Uses mono font.
+fn shape_line_for_node(line_node: &Node, font_size: f32) -> Vec<render::glyph_cache::ShapedRun> {
+    let text = line_full_text(line_node);
+    if text.is_empty() { return vec![]; }
+    render::glyph_cache::shape_line_no_cache(MONO_BYTES, 1, &text, font_size)
+}
+
 /// Pixel x for a given char col on a specific visual row.
 fn x_for_col_on_row(
-    canvas: &mut Canvas<OpenGl>,
+    _canvas: &mut Canvas<OpenGl>,
     line_lb: &LayoutBox,
     line_node: &Node,
-    row_spans: &[usize],
-    row_base: usize,
+    _row_spans: &[usize],
+    _row_base: usize,
     col: usize,
-    mono_font: Option<FontId>,
-    mono_data: &'static [u8],
+    _mono_font: Option<FontId>,
+    _mono_data: &'static [u8],
     font_size: f32,
 ) -> f32 {
-    let mut char_offset = row_base;
-    for &si in row_spans {
-        let span_text = span_text_of(line_node, si);
-        let chars: Vec<char> = span_text.chars().collect();
-        let span_x = line_lb.children.get(si).map_or(0.0, |s| s.border_box.x);
-        if col <= char_offset + chars.len() {
-            let intra = col.saturating_sub(char_offset).min(chars.len());
-            let prefix: String = chars[..intra].iter().collect();
-            return span_x + text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
-        }
-        char_offset += chars.len();
-    }
-    // Past all spans: return right edge of last span
-    row_spans.last().and_then(|&si| line_lb.children.get(si))
-        .map_or(0.0, |s| s.border_box.x + s.border_box.w)
+    let full_text = line_full_text(line_node);
+    let runs = shape_line_for_node(line_node, font_size);
+    let line_origin_x = line_lb.children.first().map_or(line_lb.border_box.x, |s| s.border_box.x);
+    let x_rel = render::glyph_cache::col_to_x_in_shaped_line(&runs, col, &full_text);
+    line_origin_x + x_rel
 }
 
 /// Paint cursor bars at the given (line, col, text) positions over the editor area.
@@ -1645,47 +1635,27 @@ pub fn paint_cursors_with_text(
     canvas: &mut Canvas<OpenGl>,
     lb: &LayoutBox,
     doc_root: &Node,
-    cursors: &[(usize, usize, &str)], // (line_idx, col, line_text)
-    mono_data: &'static [u8],
-    mono_font: Option<FontId>,
+    cursors: &[(usize, usize, &str)],
+    _mono_data: &'static [u8],
+    _mono_font: Option<FontId>,
     font_size: f32,
 ) {
     let Some(editor_lb) = lb.children.get(2) else { return };
-    // editor node is child index 2 of root
     let Some(editor_node) = doc_root.children().get(2) else { return };
 
     let cursor_color = femtovg::Color::rgbaf(0.9, 0.9, 1.0, 0.85);
     let line_h = font_size * 1.4;
 
     for &(line_idx, col, _line_text) in cursors {
-        // child[0] is line-numbers sidebar; text lines start at child[1]
         let Some(line_lb) = editor_lb.children.get(line_idx + 1) else { continue };
         let Some(line_node) = editor_node.children().get(line_idx + 1) else { continue };
 
-        // Walk spans to find which span contains col, and x offset within it.
-        let mut char_offset = 0usize;
-        let mut cursor_x = line_lb.content.x;
-        let mut cursor_y = line_lb.border_box.y;
-
-        let spans = line_node.children();
-        for (si, span_node) in spans.iter().enumerate() {
-            let span_text = span_node.children().first()
-                .and_then(|n| if let render::tree::NodeContent::Text(t) = &n.content { Some(t.as_str()) } else { None })
-                .unwrap_or("");
-            let span_chars = span_text.chars().count();
-            let Some(span_lb) = line_lb.children.get(si) else { break };
-
-            if col <= char_offset + span_chars || si + 1 == spans.len() {
-                // Cursor is inside this span (or we're past all spans).
-                let intra = col.saturating_sub(char_offset).min(span_chars);
-                let prefix: String = span_text.chars().take(intra).collect();
-                let x_off = text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
-                cursor_x = span_lb.border_box.x + x_off;
-                cursor_y = span_lb.border_box.y;
-                break;
-            }
-            char_offset += span_chars;
-        }
+        let full_text = line_full_text(line_node);
+        let runs = shape_line_for_node(line_node, font_size);
+        let line_origin_x = line_lb.children.first().map_or(line_lb.border_box.x, |s| s.border_box.x);
+        let x_rel = render::glyph_cache::col_to_x_in_shaped_line(&runs, col, &full_text);
+        let cursor_x = line_origin_x + x_rel;
+        let cursor_y = line_lb.border_box.y;
 
         let mut path = Path::new();
         path.rect(cursor_x, cursor_y, 2.0, line_h);
@@ -1700,8 +1670,8 @@ fn paint_drop_cursor(
     lb: &LayoutBox,
     doc_root: &Node,
     cursors: &[(usize, usize, &str)],
-    mono_data: &'static [u8],
-    mono_font: Option<FontId>,
+    _mono_data: &'static [u8],
+    _mono_font: Option<FontId>,
     font_size: f32,
 ) {
     let Some(editor_lb) = lb.children.get(2) else { return };
@@ -1714,28 +1684,12 @@ fn paint_drop_cursor(
         let Some(line_lb) = editor_lb.children.get(line_idx + 1) else { continue };
         let Some(line_node) = editor_node.children().get(line_idx + 1) else { continue };
 
-        let mut char_offset = 0usize;
-        let mut cursor_x = line_lb.content.x;
-        let mut cursor_y = line_lb.border_box.y;
-
-        let spans = line_node.children();
-        for (si, span_node) in spans.iter().enumerate() {
-            let span_text = span_node.children().first()
-                .and_then(|n| if let render::tree::NodeContent::Text(t) = &n.content { Some(t.as_str()) } else { None })
-                .unwrap_or("");
-            let span_chars = span_text.chars().count();
-            let Some(span_lb) = line_lb.children.get(si) else { break };
-
-            if col <= char_offset + span_chars || si + 1 == spans.len() {
-                let intra = col.saturating_sub(char_offset).min(span_chars);
-                let prefix: String = span_text.chars().take(intra).collect();
-                let x_off = text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
-                cursor_x = span_lb.border_box.x + x_off;
-                cursor_y = span_lb.border_box.y;
-                break;
-            }
-            char_offset += span_chars;
-        }
+        let full_text = line_full_text(line_node);
+        let runs = shape_line_for_node(line_node, font_size);
+        let line_origin_x = line_lb.children.first().map_or(line_lb.border_box.x, |s| s.border_box.x);
+        let x_rel = render::glyph_cache::col_to_x_in_shaped_line(&runs, col, &full_text);
+        let cursor_x = line_origin_x + x_rel;
+        let cursor_y = line_lb.border_box.y;
 
         let mut path = Path::new();
         path.rect(cursor_x - 1.0, cursor_y, 3.0, line_h);
@@ -1818,7 +1772,6 @@ pub fn hit_test_editor(
     // Pick the first span whose right edge >= mx; fall back to the last span on the row.
     // best_line_idx is the index into text_lines (0-based among text lines).
     let mut best_line_idx = 0usize;
-    let mut best_span_idx = 0usize;
     let mut found = false;
 
     'outer: for (li, line_lb) in text_lines.iter().enumerate() {
@@ -1829,7 +1782,7 @@ pub fn hit_test_editor(
         for &(si, span_lb) in &row_spans {
             if mx <= span_lb.border_box.x + span_lb.border_box.w {
                 best_line_idx = li;
-                best_span_idx = si;
+                let _ = si;
                 found = true;
                 break 'outer;
             }
@@ -1837,50 +1790,24 @@ pub fn hit_test_editor(
         // Click is past all spans on this row — use the last one.
         if let Some(&(si, _)) = row_spans.last() {
             best_line_idx = li;
-            best_span_idx = si;
+            let _ = si;
             found = true;
         }
     }
-    if !found { best_line_idx = 0; best_span_idx = 0; }
+    if !found { best_line_idx = 0; }
 
     let buf_line = best_line_idx + scroll;
     // editor_node child[0] is line-numbers, text lines start at child[1].
     let line_node = editor_node.children().get(best_line_idx + 1)?;
+    let line_lb = &editor_lb.children[best_line_idx + 1];
 
-    // Accumulate char offset up to best_span_idx.
-    let mut char_base = 0usize;
-    for si in 0..best_span_idx {
-        if let Some(span) = line_node.children().get(si) {
-            if let Some(text_node) = span.children().first() {
-                if let render::tree::NodeContent::Text(t) = &text_node.content {
-                    char_base += t.chars().count();
-                }
-            }
-        }
-    }
+    let full_text = line_full_text(line_node);
+    let runs = shape_line_for_node(line_node, font_size);
+    let line_origin_x = line_lb.children.first().map_or(line_lb.border_box.x, |s| s.border_box.x);
+    let local_x = mx - line_origin_x;
+    let col = render::glyph_cache::x_to_col_in_shaped_line(&runs, local_x, &full_text);
 
-    // Now find col within this span.
-    let span_node = line_node.children().get(best_span_idx)?;
-    let span_text = span_node.children().first()
-        .and_then(|n| if let render::tree::NodeContent::Text(t) = &n.content { Some(t.as_str()) } else { None })
-        .unwrap_or("");
-    let span_lb = &editor_lb.children[best_line_idx + 1].children[best_span_idx];
-    let local_x = mx - span_lb.border_box.x;
-
-    let chars: Vec<char> = span_text.chars().collect();
-    let mut best_col = char_base;
-    let mut best_dist = f32::INFINITY;
-    for intra in 0..=chars.len() {
-        let prefix: String = chars[..intra].iter().collect();
-        let x = text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
-        let dist = (x - local_x).abs();
-        if dist < best_dist {
-            best_dist = dist;
-            best_col = char_base + intra;
-        }
-    }
-
-    Some((buf_line, best_col))
+    Some((buf_line, col))
 }
 
 fn run_replay_script(script: &str) {
@@ -1936,10 +1863,28 @@ fn run_replay_script(script: &str) {
                 ScreenshotNamed("cursor_end_of_jp"),
                 MoveCursor(11, 9999), // end of "// Align: 12345678|"
                 ScreenshotNamed("cursor_end_of_ascii"),
+                MoveCursor(12, 9999), // end of arabic line
+                ScreenshotNamed("cursor_end_of_arabic"),
+                MoveCursor(12, 0), // start of arabic line
+                ScreenshotNamed("cursor_start_of_arabic"),
+            ]);
+        }
+        "arabic" => {
+            replay::run_script("arabic", 1024, 768, vec![
+                SetFontSize(32.0),
+                ScreenshotNamed("initial"),
+                Type("ٱلرَّحۡمَٰنِ ٱلرَّحِيمِ\n"),
+                ScreenshotNamed("after_type"),
+                MoveCursor(7, 9999), // end of arabic line
+                ScreenshotNamed("cursor_end"),
+                MoveCursor(7, 0), // logical start of arabic line
+                ScreenshotNamed("cursor_col0"),
+                MoveCursor(7, 5), // mid-word
+                ScreenshotNamed("cursor_col5"),
             ]);
         }
         _ => {
-            eprintln!("[replay] unknown script {:?}. Available: close-tab, type-text, drag-select, drag-drop, japanese-text", script);
+            eprintln!("[replay] unknown script {:?}. Available: close-tab, type-text, drag-select, drag-drop, japanese-text, arabic", script);
         }
     }
 }

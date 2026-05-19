@@ -1,13 +1,11 @@
 // Paint pass — walks LayoutBox tree and issues femtovg draw calls.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use femtovg::{Canvas, renderer::OpenGl, Paint, Path, FontId};
 use crate::render::style::{Color, Display, Overflow};
 use crate::render::tree::{Node, NodeContent};
 use crate::render::layout::{LayoutBox, Rect};
-use crate::render::glyph_cache::{GlyphCache, layout_text, os_font_for_char};
-use swash;
+use crate::render::glyph_cache::{GlyphCache, shape_line};
 
 pub struct PaintContext<'a> {
     pub canvas: &'a mut Canvas<OpenGl>,
@@ -16,8 +14,7 @@ pub struct PaintContext<'a> {
     pub mono_data: &'static [u8],
     pub hint: bool,
     pub use_femtovg: bool,
-    pub femtovg_fonts: Option<(FontId, FontId)>, // (sans, mono)
-    // Cache of dynamically loaded fallback FontIds keyed by (Arc ptr, face_index).
+    pub femtovg_fonts: Option<(FontId, FontId)>,
     pub fallback_femtovg_cache: HashMap<(usize, u32), FontId>,
 }
 
@@ -26,92 +23,24 @@ impl<'a> PaintContext<'a> {
         if family == "monospace" { (self.mono_data, 1) } else { (self.sans_data, 0) }
     }
 
-    fn font_id_for(&self, family: &str) -> Option<FontId> {
-        let (sans, mono) = self.femtovg_fonts?;
-        if family == "monospace" { Some(mono) } else { Some(sans) }
-    }
-
-    fn draw_text_femtovg(&mut self, x: f32, y: f32, text: &str, color: Color, font_size: f32, family: &str) {
-        let Some(primary_font_id) = self.font_id_for(family) else { return };
-        let tint = color.to_femtovg();
-
-        let primary_data = if family == "monospace" { self.mono_data } else { self.sans_data };
-        let font_ref = match swash::FontRef::from_index(primary_data, 0) {
-            Some(f) => f,
-            None => return,
-        };
-        let charmap = font_ref.charmap();
-        let metrics = font_ref.glyph_metrics(&[]).scale(font_size);
-        let e_width = metrics.advance_width(charmap.map('e'));
-
-        // Draw primary-font chars in batched runs for efficiency.
-        // Fallback-font chars are drawn one at a time at our computed pen_x so that
-        // our rounded advance widths control positioning, not femtovg's internal shaping.
-        let mut pen_x = x;
-        let mut primary_run_start_x = x;
-        let mut primary_run = String::new();
-
-        let flush_primary = |canvas: &mut Canvas<OpenGl>, run: &mut String, rx: f32| {
-            if run.is_empty() { return; }
-            let mut paint = Paint::color(tint);
-            paint.set_font(&[primary_font_id]);
-            paint.set_font_size(font_size);
-            let _ = canvas.fill_text(rx, y, run.as_str(), &paint);
-            run.clear();
-        };
-
-        for ch in text.chars() {
-            let gid = charmap.map(ch);
-            if gid != 0 {
-                // Primary font — batch into run.
-                let adv = metrics.advance_width(gid);
-                primary_run.push(ch);
-                pen_x += adv;
-            } else {
-                // Fallback font — flush primary run first, then draw this char individually.
-                flush_primary(self.canvas, &mut primary_run, primary_run_start_x);
-                primary_run_start_x = pen_x; // will be updated below
-
-                let fb = os_font_for_char(ch);
-                let fb_font_id = match fb {
-                    Some((ref bytes, face_idx)) => {
-                        let key = (Arc::as_ptr(bytes) as usize, face_idx);
-                        *self.fallback_femtovg_cache.entry(key).or_insert_with(|| {
-                            self.canvas.add_font_mem(bytes).unwrap_or(primary_font_id)
-                        })
-                    }
-                    None => primary_font_id,
-                };
-                let raw_adv = fb.as_ref().and_then(|(bytes, fi)| {
-                    swash::FontRef::from_index(bytes.as_ref(), *fi as usize).map(|fr| {
-                        let gid2 = fr.charmap().map(ch);
-                        fr.glyph_metrics(&[]).scale(font_size).advance_width(gid2)
-                    })
-                }).unwrap_or(e_width);
-                let adv = if raw_adv == 0.0 { 0.0 } else { (raw_adv / e_width).round().max(1.0) * e_width };
-
-                // Draw single fallback char at our pen_x.
-                let mut paint = Paint::color(tint);
-                paint.set_font(&[fb_font_id]);
-                paint.set_font_size(font_size);
-                let _ = self.canvas.fill_text(pen_x, y, &ch.to_string(), &paint);
-                pen_x += adv;
-                primary_run_start_x = pen_x;
-            }
+    /// Draw a full logical line using shaped runs.
+    /// `line_node` children are spans; `line_lb` is the line's layout box.
+    fn draw_line(&mut self, line_lb: &LayoutBox, line_node: &Node, font_size: f32, family: &str) {
+        // Concatenate all span texts.
+        let mut full_text = String::new();
+        let mut span_starts: Vec<usize> = Vec::new();
+        let mut span_colors: Vec<Color> = Vec::new();
+        for span_node in line_node.children() {
+            span_starts.push(full_text.len());
+            full_text.push_str(span_text_of_node(span_node));
+            span_colors.push(span_node.style.color);
         }
-        flush_primary(self.canvas, &mut primary_run, primary_run_start_x);
-    }
+        if full_text.is_empty() { return; }
 
-    fn draw_text(&mut self, x: f32, y: f32, text: &str, color: Color, font_size: f32, family: &str) {
-        if text.is_empty() { return; }
-        if self.use_femtovg {
-            self.draw_text_femtovg(x, y, text, color, font_size, family);
-            return;
-        }
         let (font_data, font_index) = self.font_data_for(family);
 
         self.glyph_cache.ensure_atlas(self.canvas);
-        let glyphs = layout_text(self.glyph_cache, font_data, font_index, text, font_size, self.hint);
+        let runs = shape_line(self.glyph_cache, font_data, font_index, &full_text, font_size, self.hint);
         self.glyph_cache.flush(self.canvas);
 
         let atlas_id = match self.glyph_cache.atlas {
@@ -120,38 +49,92 @@ impl<'a> PaintContext<'a> {
         };
         let atlas_f = crate::render::glyph_cache::ATLAS_SIZE as f32;
 
-        //let mut pen_x = x.round();
+        // Determine the x origin of the line (first span's border_box.x).
+        let line_origin_x = line_lb.children.first().map_or(line_lb.border_box.x, |s| s.border_box.x);
+        let baseline_y = line_lb.border_box.y + font_size;
+        let mut pen_x = 0.0_f32;
+
+        for run in &runs {
+            // Find which span owns this run's start byte for color lookup.
+            let color = {
+                let run_start = run.text_range.start;
+                let si = span_starts.partition_point(|&s| s <= run_start).saturating_sub(1).min(span_starts.len().saturating_sub(1));
+                span_colors.get(si).copied().unwrap_or(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })
+            };
+            let tint = femtovg::Color::rgbaf(color.r, color.g, color.b, color.a);
+
+            let font_data_for_run: &[u8] = run.font_bytes.as_deref()
+                .map(|b| b.as_slice())
+                .unwrap_or(font_data);
+
+            for g in &run.glyphs {
+                if let Some(cg) = self.glyph_cache.get_cached(g.glyph_id, run.font_index, font_size) {
+                    if cg.width > 0 && cg.height > 0 {
+                        let gx = (line_origin_x + pen_x + g.x_offset + cg.bearing_x as f32).round();
+                        let gy = (baseline_y - g.y_offset - cg.bearing_y as f32).round();
+                        let gw = cg.width as f32;
+                        let gh = cg.height as f32;
+                        let cx = gx - cg.atlas_x as f32;
+                        let cy = gy - cg.atlas_y as f32;
+                        let paint = Paint::image_tint(atlas_id, cx, cy, atlas_f, atlas_f, 0.0, tint)
+                            .with_anti_alias(false);
+                        let mut path = Path::new();
+                        path.rect(gx, gy, gw, gh);
+                        self.canvas.fill_path(&path, &paint);
+                    }
+                }
+                let _ = font_data_for_run; // used implicitly via glyph_cache key
+                pen_x += g.x_advance;
+            }
+        }
+    }
+
+    fn draw_text(&mut self, x: f32, y: f32, text: &str, color: Color, font_size: f32, family: &str) {
+        if text.is_empty() { return; }
+        // Fallback: draw a single span's text as its own shaped line.
+        // Used for non-editor text nodes (labels, menus, etc.).
+        let (font_data, font_index) = self.font_data_for(family);
+
+        self.glyph_cache.ensure_atlas(self.canvas);
+        let runs = shape_line(self.glyph_cache, font_data, font_index, text, font_size, self.hint);
+        self.glyph_cache.flush(self.canvas);
+
+        let atlas_id = match self.glyph_cache.atlas { Some(id) => id, None => return };
+        let atlas_f = crate::render::glyph_cache::ATLAS_SIZE as f32;
+
         let mut pen_x = x;
         let tint = femtovg::Color::rgbaf(color.r, color.g, color.b, color.a);
 
-        for (glyph_id, advance, _fallback_bytes, glyph_font_index) in &glyphs {
-            if let Some(g) = self.glyph_cache.get_cached(*glyph_id, *glyph_font_index, font_size) {
-                if g.width > 0 && g.height > 0 {
-                    let gx = (pen_x + g.bearing_x as f32).round();
-                    let gy = (y - g.bearing_y as f32).round();
-                    let gw = g.width as f32;
-                    let gh = g.height as f32;
-
-                    // Paint::image_tint(id, cx, cy, img_w, img_h, angle, tint):
-                    //   cx, cy = world coords of the atlas image's top-left corner
-                    //   img_w, img_h = full atlas size in world coords
-                    // The paint samples tex coords proportional to position within [cx..cx+img_w, cy..cy+img_h].
-                    // To map glyph at atlas (atlas_x, atlas_y) to screen (gx, gy):
-                    //   cx = gx - atlas_x, cy = gy - atlas_y
-                    let cx = gx - g.atlas_x as f32;
-                    let cy = gy - g.atlas_y as f32;
-
-                    // Atlas stores premultiplied white glyphs; image_tint multiplies by text color.
-                    let paint = Paint::image_tint(atlas_id, cx, cy, atlas_f, atlas_f, 0.0, tint)
-                        .with_anti_alias(false);
-                    let mut path = Path::new();
-                    path.rect(gx, gy, gw, gh);
-                    self.canvas.fill_path(&path, &paint);
+        for run in &runs {
+            let _font_data_for_run: &[u8] = run.font_bytes.as_deref()
+                .map(|b| b.as_slice())
+                .unwrap_or(font_data);
+            for g in &run.glyphs {
+                if let Some(cg) = self.glyph_cache.get_cached(g.glyph_id, run.font_index, font_size) {
+                    if cg.width > 0 && cg.height > 0 {
+                        let gx = (pen_x + g.x_offset + cg.bearing_x as f32).round();
+                        let gy = (y - g.y_offset - cg.bearing_y as f32).round();
+                        let gw = cg.width as f32;
+                        let gh = cg.height as f32;
+                        let cx = gx - cg.atlas_x as f32;
+                        let cy = gy - cg.atlas_y as f32;
+                        let paint = Paint::image_tint(atlas_id, cx, cy, atlas_f, atlas_f, 0.0, tint)
+                            .with_anti_alias(false);
+                        let mut path = Path::new();
+                        path.rect(gx, gy, gw, gh);
+                        self.canvas.fill_path(&path, &paint);
+                    }
                 }
+                pen_x += g.x_advance;
             }
-            pen_x += advance;
         }
     }
+}
+
+fn span_text_of_node(span: &Node) -> &str {
+    span.children().first()
+        .and_then(|n| if let NodeContent::Text(t) = &n.content { Some(t.as_str()) } else { None })
+        .unwrap_or("")
 }
 
 /// Paint the full tree: normal pass then a global overlay for all absolutely-positioned nodes.
@@ -243,6 +226,13 @@ pub fn paint_tree(ctx: &mut PaintContext, node: &Node, lb: &LayoutBox) {
                 &s.font_family,
             );
         }
+    }
+
+    // For editor line nodes (class="line" or "cursor-line"), draw all spans as one shaped line.
+    if node.has_class("line") || node.has_class("cursor-line") {
+        ctx.draw_line(lb, node, s.font_size, &s.font_family);
+        ctx.canvas.restore();
+        return;
     }
 
     // Children (sorted by z-index), skipping absolutely-positioned ones (painted in overlay pass).
