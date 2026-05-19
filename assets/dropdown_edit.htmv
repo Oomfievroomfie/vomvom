@@ -1,4 +1,5 @@
 <div class="dropdown">
     <div class="menu-item" action="undo">Undo       Ctrl+Z</div>
     <div class="menu-item" action="redo">Redo       Ctrl+Y</div>
+    <div class="menu-item" action="toggle-grid-snap">Grid Snap</div>
 </div>

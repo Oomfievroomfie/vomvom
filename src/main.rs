@@ -57,6 +57,7 @@ pub struct AppState {
     pub gl_context: PossiblyCurrentContext,
     glyph_cache: GlyphCache,
     hint: bool,
+    pub grid_snap: bool,
     use_femtovg: bool,
     pub femtovg_fonts: Option<(FontId, FontId)>,
     sheet: Stylesheet,
@@ -110,6 +111,7 @@ impl AppState {
             gl_context,
             glyph_cache: GlyphCache::new(),
             hint: true,
+            grid_snap: true,
             use_femtovg: false,
             femtovg_fonts: Some((sans_id, mono_id)),
             sheet,
@@ -183,6 +185,7 @@ impl AppState {
             self.femtovg_fonts,
             self.hint,
             self.use_femtovg,
+            self.grid_snap,
             self.last_layout.as_ref(),
         );
         self.last_layout = Some(lb.clone());
@@ -196,14 +199,14 @@ impl AppState {
         let mono_font = self.femtovg_fonts.filter(|_| self.use_femtovg).map(|(_, m)| m);
 
         if let Some((sel_start, sel_end)) = buf.selection_range() {
-            paint_selection(&mut self.canvas, &lb, &self.doc.root, sel_start, sel_end, scroll, MONO_BYTES, mono_font, self.editor_font_size);
+            paint_selection(&mut self.canvas, &lb, &self.doc.root, sel_start, sel_end, scroll, MONO_BYTES, mono_font, self.editor_font_size, self.grid_snap);
         }
 
         if buf.cursor.line >= scroll {
             let line_text = buf.line(buf.cursor.line);
             let layout_line = buf.cursor.line - scroll;
             let cursors = vec![(layout_line, buf.cursor.col, line_text.as_str())];
-            paint_cursors_with_text(&mut self.canvas, &lb, &self.doc.root, &cursors, MONO_BYTES, mono_font, self.editor_font_size);
+            paint_cursors_with_text(&mut self.canvas, &lb, &self.doc.root, &cursors, MONO_BYTES, mono_font, self.editor_font_size, self.grid_snap);
         }
 
         // During selection drag-and-drop, paint a distinct drop-cursor at drag pos.
@@ -212,7 +215,7 @@ impl AppState {
                 let line_text = buf.line(drop_pos.line);
                 let layout_line = drop_pos.line - scroll;
                 let cursors = vec![(layout_line, drop_pos.col, line_text.as_str())];
-                paint_drop_cursor(&mut self.canvas, &lb, &self.doc.root, &cursors, MONO_BYTES, mono_font, self.editor_font_size);
+                paint_drop_cursor(&mut self.canvas, &lb, &self.doc.root, &cursors, MONO_BYTES, mono_font, self.editor_font_size, self.grid_snap);
             }
         }
 
@@ -239,8 +242,12 @@ impl AppState {
             if let Some(action) = hit_test_menu_item(&self.doc.root, lb, mx, my) {
                 eprintln!("[click] hit action: {:?}", action);
                 close_all_menus(&mut self.doc);
-                execute_menu_action(&action, &mut self.session);
-                self.highlight_dirty = true;
+                if action == "toggle-grid-snap" {
+                    self.grid_snap = !self.grid_snap;
+                } else {
+                    execute_menu_action(&action, &mut self.session);
+                    self.highlight_dirty = true;
+                }
                 self.needs_redraw = true;
                 return;
             }
@@ -268,7 +275,7 @@ impl AppState {
             self.needs_redraw = true;
         } else if let Some((line, col)) = {
             let mono_font = self.femtovg_fonts.filter(|_| self.use_femtovg).map(|(_, m)| m);
-            hit_test_editor(&mut self.canvas, lb, &self.doc.root, &self.session, mx, my, MONO_BYTES, mono_font, self.editor_font_size)
+            hit_test_editor(&mut self.canvas, lb, &self.doc.root, &self.session, mx, my, MONO_BYTES, mono_font, self.editor_font_size, self.grid_snap)
         } {
             let click_pos = session::buffer::Pos::new(line, col);
             let inside_selection = !shift && self.session.active().selection_range()
@@ -317,7 +324,7 @@ impl AppState {
         } else if self.selection_drag {
             if let Some(ref lb) = self.last_layout.clone() {
                 let mono_font = self.femtovg_fonts.filter(|_| self.use_femtovg).map(|(_, m)| m);
-                if let Some((line, col)) = hit_test_editor(&mut self.canvas, lb, &self.doc.root, &self.session, mx, my, MONO_BYTES, mono_font, self.editor_font_size) {
+                if let Some((line, col)) = hit_test_editor(&mut self.canvas, lb, &self.doc.root, &self.session, mx, my, MONO_BYTES, mono_font, self.editor_font_size, self.grid_snap) {
                     self.selection_drag_pos = Some(session::buffer::Pos::new(line, col));
                     self.needs_redraw = true;
                 }
@@ -325,7 +332,7 @@ impl AppState {
         } else if self.editor_drag {
             if let Some(ref lb) = self.last_layout.clone() {
                 let mono_font = self.femtovg_fonts.filter(|_| self.use_femtovg).map(|(_, m)| m);
-                if let Some((line, col)) = hit_test_editor(&mut self.canvas, lb, &self.doc.root, &self.session, mx, my, MONO_BYTES, mono_font, self.editor_font_size) {
+                if let Some((line, col)) = hit_test_editor(&mut self.canvas, lb, &self.doc.root, &self.session, mx, my, MONO_BYTES, mono_font, self.editor_font_size, self.grid_snap) {
                     self.session.active_mut().move_cursor(line, col);
                     self.cursor_ideal_x = None;
                     let editor_h = editor_content_height(win_h);
@@ -536,12 +543,12 @@ impl AppState {
                     let mono_font = self.femtovg_fonts.filter(|_| self.use_femtovg).map(|(_, m)| m);
                     let line_count = buf.line_count();
                     if self.cursor_ideal_x.is_none() {
-                        if let Some(x) = compute_cursor_x(&mut self.canvas, &self.last_layout, &self.doc.root, pos.line, pos.col, scroll, mono_font, MONO_BYTES, self.editor_font_size) {
+                        if let Some(x) = compute_cursor_x(&mut self.canvas, &self.last_layout, &self.doc.root, pos.line, pos.col, scroll, mono_font, MONO_BYTES, self.editor_font_size, self.grid_snap) {
                             self.cursor_ideal_x = Some(x);
                         }
                     }
                     let ideal_x = self.cursor_ideal_x.unwrap_or(0.0);
-                    let (new_line, new_col) = move_cursor_vertical(&mut self.canvas, &self.last_layout, &self.doc.root, pos.line, pos.col, scroll, line_count, -1, ideal_x, mono_font, MONO_BYTES, self.editor_font_size);
+                    let (new_line, new_col) = move_cursor_vertical(&mut self.canvas, &self.last_layout, &self.doc.root, pos.line, pos.col, scroll, line_count, -1, ideal_x, mono_font, MONO_BYTES, self.editor_font_size, self.grid_snap);
                     buf.move_cursor(new_line, new_col);
                     buf.break_undo_group();
                 }
@@ -552,12 +559,12 @@ impl AppState {
                     let mono_font = self.femtovg_fonts.filter(|_| self.use_femtovg).map(|(_, m)| m);
                     let line_count = buf.line_count();
                     if self.cursor_ideal_x.is_none() {
-                        if let Some(x) = compute_cursor_x(&mut self.canvas, &self.last_layout, &self.doc.root, pos.line, pos.col, scroll, mono_font, MONO_BYTES, self.editor_font_size) {
+                        if let Some(x) = compute_cursor_x(&mut self.canvas, &self.last_layout, &self.doc.root, pos.line, pos.col, scroll, mono_font, MONO_BYTES, self.editor_font_size, self.grid_snap) {
                             self.cursor_ideal_x = Some(x);
                         }
                     }
                     let ideal_x = self.cursor_ideal_x.unwrap_or(0.0);
-                    let (new_line, new_col) = move_cursor_vertical(&mut self.canvas, &self.last_layout, &self.doc.root, pos.line, pos.col, scroll, line_count, 1, ideal_x, mono_font, MONO_BYTES, self.editor_font_size);
+                    let (new_line, new_col) = move_cursor_vertical(&mut self.canvas, &self.last_layout, &self.doc.root, pos.line, pos.col, scroll, line_count, 1, ideal_x, mono_font, MONO_BYTES, self.editor_font_size, self.grid_snap);
                     buf.move_cursor(new_line, new_col);
                     buf.break_undo_group();
                 }
@@ -700,6 +707,7 @@ impl ApplicationHandler for App {
             gl_context,
             glyph_cache: GlyphCache::new(),
             hint: true,
+            grid_snap: true,
             use_femtovg: false,
             femtovg_fonts: None,
             sheet,
@@ -1131,6 +1139,7 @@ pub fn render_frame(
     femtovg_fonts: Option<(FontId, FontId)>,
     hint: bool,
     use_femtovg: bool,
+    grid_snap: bool,
     last_layout: Option<&LayoutBox>,
 ) -> LayoutBox {
     let editor_h = editor_content_height(h);
@@ -1159,6 +1168,7 @@ pub fn render_frame(
         use_femtovg,
         femtovg_fonts,
         fallback_femtovg_cache: std::collections::HashMap::new(),
+        grid_snap,
     };
     paint_tree_root(&mut ctx, &doc.root, &lb);
 
@@ -1346,6 +1356,7 @@ fn compute_cursor_x(
     mono_font: Option<FontId>,
     mono_data: &'static [u8],
     font_size: f32,
+    grid_snap: bool,
 ) -> Option<f32> {
     if logical_line < scroll { return None; }
     let layout_idx = logical_line - scroll;
@@ -1353,7 +1364,7 @@ fn compute_cursor_x(
     let editor_node = doc_root.children().get(2)?;
     let line_lb = editor_lb.children.get(layout_idx + 1)?;
     let line_node = editor_node.children().get(layout_idx + 1)?;
-    let (_, x) = cursor_visual_row_and_x(canvas, line_lb, line_node, col, mono_font, mono_data, font_size);
+    let (_, x) = cursor_visual_row_and_x(canvas, line_lb, line_node, col, mono_font, mono_data, font_size, grid_snap);
     Some(x)
 }
 
@@ -1372,6 +1383,7 @@ fn move_cursor_vertical(
     mono_font: Option<FontId>,
     mono_data: &'static [u8],
     font_size: f32,
+    grid_snap: bool,
 ) -> (usize, usize) {
     // Try within the same logical line.
     if logical_line >= scroll {
@@ -1383,12 +1395,12 @@ fn move_cursor_vertical(
             if let (Some(line_lb), Some(line_node)) = (editor_lb.children.get(layout_idx + 1), editor_node.children().get(layout_idx + 1)) {
                 let span_count = line_node.children().len();
                 let rows = visual_rows_for_line(line_lb, span_count);
-                let (cur_vrow, _) = cursor_visual_row_and_x(canvas, line_lb, line_node, col, mono_font, mono_data, font_size);
+                let (cur_vrow, _) = cursor_visual_row_and_x(canvas, line_lb, line_node, col, mono_font, mono_data, font_size, grid_snap);
                 let target_vrow = cur_vrow as i32 + dir;
                 if target_vrow >= 0 && (target_vrow as usize) < rows.len() {
                     let row = &rows[target_vrow as usize];
                     let base = char_base_for_row(line_node, row);
-                    let new_col = col_at_x_on_row(canvas, line_lb, line_node, row, base, ideal_x, mono_font, mono_data, font_size);
+                    let new_col = col_at_x_on_row(canvas, line_lb, line_node, row, base, ideal_x, mono_font, mono_data, font_size, grid_snap);
                     return (logical_line, new_col);
                 }
             }
@@ -1420,7 +1432,7 @@ fn move_cursor_vertical(
                 rows.first().map(|r| r.as_slice()).unwrap_or(&[])
             };
             let base = char_base_for_row(line_node, row);
-            let new_col = col_at_x_on_row(canvas, line_lb, line_node, row, base, ideal_x, mono_font, mono_data, font_size);
+            let new_col = col_at_x_on_row(canvas, line_lb, line_node, row, base, ideal_x, mono_font, mono_data, font_size, grid_snap);
             return (target_logical, new_col);
         }
     }
@@ -1453,12 +1465,13 @@ fn cursor_visual_row_and_x(
     _mono_font: Option<FontId>,
     _mono_data: &'static [u8],
     font_size: f32,
+    grid_snap: bool,
 ) -> (usize, f32) {
     let span_count = line_node.children().len();
     let rows = visual_rows_for_line(line_lb, span_count);
 
     let full_text = line_full_text(line_node);
-    let runs = shape_line_for_node(line_node, font_size);
+    let runs = shape_line_for_node(line_node, font_size, grid_snap);
 
     // Find which span contains the col to determine visual row.
     let mut char_offset = 0usize;
@@ -1489,9 +1502,10 @@ fn col_at_x_on_row(
     _mono_font: Option<FontId>,
     _mono_data: &'static [u8],
     font_size: f32,
+    grid_snap: bool,
 ) -> usize {
     let full_text = line_full_text(line_node);
-    let runs = shape_line_for_node(line_node, font_size);
+    let runs = shape_line_for_node(line_node, font_size, grid_snap);
     let line_origin_x = line_lb.children.first().map_or(line_lb.border_box.x, |s| s.border_box.x);
     let local_x = target_x - line_origin_x;
     render::glyph_cache::x_to_col_in_shaped_line(&runs, local_x, &full_text)
@@ -1526,6 +1540,7 @@ pub fn paint_selection(
     mono_data: &'static [u8],
     mono_font: Option<FontId>,
     font_size: f32,
+    grid_snap: bool,
 ) {
     let Some(editor_lb) = lb.children.get(2) else { return };
     let Some(editor_node) = doc_root.children().get(2) else { return };
@@ -1576,9 +1591,9 @@ pub fn paint_selection(
             let row_sel_start = col_start.max(row_base);
             let row_sel_end = col_end.min(row_end);
 
-            let x_left = x_for_col_on_row(canvas, line_lb, line_node, row, row_base, row_sel_start, mono_font, mono_data, font_size);
+            let x_left = x_for_col_on_row(canvas, line_lb, line_node, row, row_base, row_sel_start, mono_font, mono_data, font_size, grid_snap);
             let x_right = if logical_line == sel_end.line && col_end <= row_end {
-                x_for_col_on_row(canvas, line_lb, line_node, row, row_base, row_sel_end, mono_font, mono_data, font_size)
+                x_for_col_on_row(canvas, line_lb, line_node, row, row_base, row_sel_end, mono_font, mono_data, font_size, grid_snap)
             } else {
                 // Selection continues past this row: extend to edge of editor content area.
                 editor_lb.content.x + editor_lb.content.w
@@ -1605,10 +1620,10 @@ fn line_full_text(line_node: &Node) -> String {
 }
 
 /// Shape the full line text and return the runs. Uses mono font.
-fn shape_line_for_node(line_node: &Node, font_size: f32) -> Vec<render::glyph_cache::ShapedRun> {
+fn shape_line_for_node(line_node: &Node, font_size: f32, grid_snap: bool) -> Vec<render::glyph_cache::ShapedRun> {
     let text = line_full_text(line_node);
     if text.is_empty() { return vec![]; }
-    render::glyph_cache::shape_line_no_cache(MONO_BYTES, 1, &text, font_size)
+    render::glyph_cache::shape_line_no_cache(MONO_BYTES, 1, &text, font_size, grid_snap)
 }
 
 /// Pixel x for a given char col on a specific visual row.
@@ -1622,9 +1637,10 @@ fn x_for_col_on_row(
     _mono_font: Option<FontId>,
     _mono_data: &'static [u8],
     font_size: f32,
+    grid_snap: bool,
 ) -> f32 {
     let full_text = line_full_text(line_node);
-    let runs = shape_line_for_node(line_node, font_size);
+    let runs = shape_line_for_node(line_node, font_size, grid_snap);
     let line_origin_x = line_lb.children.first().map_or(line_lb.border_box.x, |s| s.border_box.x);
     let x_rel = render::glyph_cache::col_to_x_in_shaped_line(&runs, col, &full_text);
     line_origin_x + x_rel
@@ -1639,6 +1655,7 @@ pub fn paint_cursors_with_text(
     _mono_data: &'static [u8],
     _mono_font: Option<FontId>,
     font_size: f32,
+    grid_snap: bool,
 ) {
     let Some(editor_lb) = lb.children.get(2) else { return };
     let Some(editor_node) = doc_root.children().get(2) else { return };
@@ -1651,7 +1668,7 @@ pub fn paint_cursors_with_text(
         let Some(line_node) = editor_node.children().get(line_idx + 1) else { continue };
 
         let full_text = line_full_text(line_node);
-        let runs = shape_line_for_node(line_node, font_size);
+        let runs = shape_line_for_node(line_node, font_size, grid_snap);
         let line_origin_x = line_lb.children.first().map_or(line_lb.border_box.x, |s| s.border_box.x);
         let x_rel = render::glyph_cache::col_to_x_in_shaped_line(&runs, col, &full_text);
         let cursor_x = line_origin_x + x_rel;
@@ -1673,6 +1690,7 @@ fn paint_drop_cursor(
     _mono_data: &'static [u8],
     _mono_font: Option<FontId>,
     font_size: f32,
+    grid_snap: bool,
 ) {
     let Some(editor_lb) = lb.children.get(2) else { return };
     let Some(editor_node) = doc_root.children().get(2) else { return };
@@ -1685,7 +1703,7 @@ fn paint_drop_cursor(
         let Some(line_node) = editor_node.children().get(line_idx + 1) else { continue };
 
         let full_text = line_full_text(line_node);
-        let runs = shape_line_for_node(line_node, font_size);
+        let runs = shape_line_for_node(line_node, font_size, grid_snap);
         let line_origin_x = line_lb.children.first().map_or(line_lb.border_box.x, |s| s.border_box.x);
         let x_rel = render::glyph_cache::col_to_x_in_shaped_line(&runs, col, &full_text);
         let cursor_x = line_origin_x + x_rel;
@@ -1732,6 +1750,7 @@ pub fn hit_test_editor(
     mono_data: &'static [u8],
     mono_font: Option<FontId>,
     font_size: f32,
+    grid_snap: bool,
 ) -> Option<(usize, usize)> {
     let editor_lb = lb.children.get(2)?;
     if !editor_lb.border_box.contains(mx, my) { return None; }
@@ -1802,7 +1821,7 @@ pub fn hit_test_editor(
     let line_lb = &editor_lb.children[best_line_idx + 1];
 
     let full_text = line_full_text(line_node);
-    let runs = shape_line_for_node(line_node, font_size);
+    let runs = shape_line_for_node(line_node, font_size, grid_snap);
     let line_origin_x = line_lb.children.first().map_or(line_lb.border_box.x, |s| s.border_box.x);
     let local_x = mx - line_origin_x;
     let col = render::glyph_cache::x_to_col_in_shaped_line(&runs, local_x, &full_text);

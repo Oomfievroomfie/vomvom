@@ -16,6 +16,7 @@ pub struct PaintContext<'a> {
     pub use_femtovg: bool,
     pub femtovg_fonts: Option<(FontId, FontId)>,
     pub fallback_femtovg_cache: HashMap<(usize, u32), FontId>,
+    pub grid_snap: bool,
 }
 
 impl<'a> PaintContext<'a> {
@@ -40,7 +41,7 @@ impl<'a> PaintContext<'a> {
         let (font_data, font_index) = self.font_data_for(family);
 
         self.glyph_cache.ensure_atlas(self.canvas);
-        let runs = shape_line(self.glyph_cache, font_data, font_index, &full_text, font_size, self.hint);
+        let runs = shape_line(self.glyph_cache, font_data, font_index, &full_text, font_size, self.hint, self.grid_snap);
         self.glyph_cache.flush(self.canvas);
 
         let atlas_id = match self.glyph_cache.atlas {
@@ -96,7 +97,7 @@ impl<'a> PaintContext<'a> {
         let (font_data, font_index) = self.font_data_for(family);
 
         self.glyph_cache.ensure_atlas(self.canvas);
-        let runs = shape_line(self.glyph_cache, font_data, font_index, text, font_size, self.hint);
+        let runs = shape_line(self.glyph_cache, font_data, font_index, text, font_size, self.hint, self.grid_snap);
         self.glyph_cache.flush(self.canvas);
 
         let atlas_id = match self.glyph_cache.atlas { Some(id) => id, None => return };

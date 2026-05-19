@@ -430,9 +430,10 @@ pub fn shape_line(
     text: &str,
     size_px: f32,
     hint: bool,
+    grid_snap: bool,
 ) -> Vec<ShapedRun> {
     if text.is_empty() { return vec![]; }
-    shape_line_inner(Some(cache), font_data, font_index, text, size_px, hint)
+    shape_line_inner(Some(cache), font_data, font_index, text, size_px, hint, grid_snap)
 }
 
 fn shape_line_inner(
@@ -442,6 +443,7 @@ fn shape_line_inner(
     text: &str,
     size_px: f32,
     hint: bool,
+    grid_snap: bool,
 ) -> Vec<ShapedRun> {
     use unicode_bidi::BidiInfo;
 
@@ -602,7 +604,7 @@ fn shape_line_inner(
             total_advance += x_adv_raw;
         }
 
-        if is_fallback {
+        if is_fallback && grid_snap {
             // Snap fallback advances to the monospace grid, but respect cursive grouping.
             // Group consecutive glyphs that are attached (same cluster, or any glyph in
             // the group has a non-zero x_offset indicating GPOS attachment to a neighbour).
@@ -666,14 +668,14 @@ fn shape_line_inner(
 /// Measure total pixel width of text using BiDi shaping (no rasterization).
 pub fn measure_shaped_width(font_data: &'static [u8], text: &str, size_px: f32) -> f32 {
     if text.is_empty() { return 0.0; }
-    let runs = shape_line_inner(None, font_data, 0, text, size_px, false);
+    let runs = shape_line_inner(None, font_data, 0, text, size_px, false, true);
     runs.iter().map(|r| r.total_advance).sum()
 }
 
 /// Shape a line without a GlyphCache (no rasterization). For cursor math.
-pub fn shape_line_no_cache(font_data: &'static [u8], font_index: u8, text: &str, size_px: f32) -> Vec<ShapedRun> {
+pub fn shape_line_no_cache(font_data: &'static [u8], font_index: u8, text: &str, size_px: f32, grid_snap: bool) -> Vec<ShapedRun> {
     if text.is_empty() { return vec![]; }
-    shape_line_inner(None, font_data, font_index, text, size_px, false)
+    shape_line_inner(None, font_data, font_index, text, size_px, false, grid_snap)
 }
 
 // ─── col_to_x_in_shaped_line ─────────────────────────────────────────────────
