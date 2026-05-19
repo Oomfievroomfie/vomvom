@@ -88,23 +88,28 @@ impl<'a> PaintContext<'a> {
     }
 }
 
-/// Paint the full tree: normal pass then overlay pass for absolutely-positioned nodes.
+/// Paint the full tree: normal pass then a global overlay for all absolutely-positioned nodes.
+/// Absolute nodes are collected across the entire tree (depth-first) and painted last, sorted
+/// by z-index, so they always appear above all non-absolute content regardless of tree depth.
 pub fn paint_tree_root(ctx: &mut PaintContext, node: &Node, lb: &LayoutBox) {
     paint_tree(ctx, node, lb);
-    // Collect and paint absolute nodes on top (global stacking context).
-    paint_absolute_overlay(ctx, node, lb);
+    let mut overlay: Vec<(&Node, &LayoutBox)> = Vec::new();
+    collect_absolute_overlay(node, lb, &mut overlay);
+    overlay.sort_by_key(|(n, _)| n.style.z_index);
+    for (abs_node, abs_lb) in overlay {
+        paint_tree(ctx, abs_node, abs_lb);
+    }
 }
 
-fn paint_absolute_overlay(ctx: &mut PaintContext, node: &Node, lb: &LayoutBox) {
+fn collect_absolute_overlay<'a>(node: &'a Node, lb: &'a LayoutBox, out: &mut Vec<(&'a Node, &'a LayoutBox)>) {
     use crate::render::style::Position;
     for (i, child_node) in node.children().iter().enumerate() {
-        let child_lb = &lb.children[i];
+        let Some(child_lb) = lb.children.get(i) else { continue };
         if child_node.style.position == Position::Absolute {
-            paint_tree(ctx, child_node, child_lb);
-            // Also recurse into this absolute node's own absolute descendants.
-            paint_absolute_overlay(ctx, child_node, child_lb);
+            out.push((child_node, child_lb));
+            collect_absolute_overlay(child_node, child_lb, out);
         } else {
-            paint_absolute_overlay(ctx, child_node, child_lb);
+            collect_absolute_overlay(child_node, child_lb, out);
         }
     }
 }

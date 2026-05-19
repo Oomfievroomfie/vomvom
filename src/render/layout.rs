@@ -127,9 +127,15 @@ fn layout_element(node: &Node, constraints: Constraints, measurer: &mut dyn Text
     let chrome_x = pl + pr + bw * 2.0;
     let chrome_y = pt + pb + bw * 2.0;
 
-    // Block/Flex fills available width; inline variants shrink-wrap when width is auto.
-    let shrink_wrap = matches!(s.display, Display::InlineBlock | Display::Inline | Display::InlineFlex)
-        && s.width == Length::Auto;
+    // Block/Flex fills available width; inline variants and absolutely-positioned
+    // elements with auto width shrink-wrap to their content.
+    // Also, any element receiving infinite available_w is in a shrink-wrap measurement context
+    // (e.g. a block child of a shrink-wrap container), so it shrink-wraps too.
+    let infinite_context = constraints.available_w.is_infinite();
+    let shrink_wrap = ((matches!(s.display, Display::InlineBlock | Display::Inline | Display::InlineFlex)
+        || s.position == Position::Absolute)
+        && s.width == Length::Auto)
+        || (infinite_context && s.width == Length::Auto);
     let fill_w = constraints.available_w.min(1_000_000.0); // don't fill infinite space
     let inner_w = resolve_length(s.width, constraints.available_w)
         .unwrap_or(if shrink_wrap { 0.0 } else { fill_w - ml - mr - chrome_x })
@@ -137,7 +143,7 @@ fn layout_element(node: &Node, constraints: Constraints, measurer: &mut dyn Text
     let inner_w = clamp_size(inner_w, s.min_width, s.max_width, constraints.available_w);
 
     // Shrink-wrap elements pass infinite width to children so children can report natural size.
-    let child_w = if shrink_wrap { constraints.available_w } else { inner_w };
+    let child_w = if shrink_wrap { f32::INFINITY } else { inner_w };
     let content_constraints = Constraints::new(child_w, constraints.available_h - chrome_y);
 
     // Children are laid out in local space relative to this node's content rect.
@@ -169,15 +175,19 @@ fn layout_element(node: &Node, constraints: Constraints, measurer: &mut dyn Text
         });
     let inner_h = clamp_size(inner_h, s.min_height, s.max_height, constraints.available_h);
 
-    // Absolute children use the constrained viewport height, not the content-scroll height.
-    let abs_containing_h = if s.height == Length::Auto && !shrink_wrap {
-        (constraints.available_h - chrome_y).max(0.0)
-    } else {
-        inner_h
-    };
-    layout_absolute_children(node, inner_w, abs_containing_h, pl, pt, bw, &mut children, measurer);
+    // Only lay out absolute children if this node is a positioned ancestor (position != static).
+    // In CSS, an absolutely-positioned element's containing block is its nearest non-static ancestor.
+    if s.position != Position::Static {
+        let abs_containing_h = if s.height == Length::Auto && !shrink_wrap {
+            (constraints.available_h - chrome_y).max(0.0)
+        } else {
+            inner_h
+        };
+        layout_absolute_children(node, inner_w, abs_containing_h, pl, pt, bw, &mut children, measurer);
+    }
 
     // For shrink-wrap elements, width comes from in-flow children extents only.
+    // Then re-lay-out children with the resolved width so block children fill correctly.
     let inner_w = if shrink_wrap {
         let children_w = node.children().iter().zip(children.iter())
             .filter(|(n, _)| n.style.position != Position::Absolute)
@@ -186,6 +196,32 @@ fn layout_element(node: &Node, constraints: Constraints, measurer: &mut dyn Text
     } else {
         inner_w
     };
+
+    // Second pass: re-lay-out children with the resolved inner_w so that block children
+    // (which fill available width) get the correct final width instead of INFINITY.
+    if shrink_wrap {
+        let final_constraints = Constraints::new(inner_w, constraints.available_h - chrome_y);
+        children = match s.display {
+            Display::Flex | Display::InlineFlex => {
+                let in_flow = layout_flex(node, final_constraints, s.flex_direction, s.flex_wrap, s.align_items, s.justify_content, s.gap, measurer);
+                let mut result = Vec::with_capacity(node.children().len());
+                let mut in_flow_iter = in_flow.into_iter();
+                for child in node.children() {
+                    if child.style.position == Position::Absolute {
+                        result.push(LayoutBox::leaf(Rect::default(), Rect::default()));
+                    } else {
+                        result.push(in_flow_iter.next().unwrap_or_else(|| LayoutBox::leaf(Rect::default(), Rect::default())));
+                    }
+                }
+                result
+            }
+            _ => layout_block_children(node, final_constraints, measurer),
+        };
+        // Re-run absolute children layout with the resolved width.
+        if s.position != Position::Static {
+            layout_absolute_children(node, inner_w, inner_h, pl, pt, bw, &mut children, measurer);
+        }
+    }
 
     // Border box is at (ml, mt) in parent-content space.
     let bx = ml;
