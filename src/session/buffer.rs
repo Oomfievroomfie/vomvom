@@ -372,6 +372,82 @@ impl Buffer {
         true
     }
 
+    /// Delete the current selection and insert `text` at `drop`, as a single undo group.
+    /// `drop` is the pre-deletion position; it is adjusted internally for the shift.
+    /// Clears the selection. Caller must have already called break_undo_group() before this
+    /// if needed to separate it from prior edits.
+    pub fn move_selection_to(&mut self, text: &str, drop: Pos) {
+        let Some((sel_start, sel_end)) = self.selection_range() else { return };
+
+        // Choose the group id now, before any edits mutate group state.
+        self.next_group += 1;
+        let group_id = self.next_group;
+
+        // ── delete the selection ──────────────────────────────────────────────
+        let sc = self.pos_to_char(sel_start);
+        let ec = self.pos_to_char(sel_end);
+        let deleted: String = self.rope.chars_at(sc).take(ec - sc).collect();
+        self.apply_delete(sel_start, sel_end);
+        self.truncate_redo();
+        let del_seq = self.next_seq;
+        self.next_seq += 1;
+        self.ops.push(crate::session::db::UndoOp {
+            seq: del_seq,
+            kind: crate::session::db::OpKind::Delete,
+            line_start: sel_start.line as i64,
+            col_start: sel_start.col as i64,
+            line_end: sel_end.line as i64,
+            col_end: sel_end.col as i64,
+            text: deleted,
+            group_id,
+        });
+        self.undo_head = Some(self.ops.len() - 1);
+        self.anchor = None;
+
+        // ── adjust drop position for the deletion ─────────────────────────────
+        let removed_lines = sel_end.line - sel_start.line;
+        let adjusted_drop = if drop > sel_end {
+            if drop.line > sel_end.line {
+                Pos::new(drop.line - removed_lines, drop.col)
+            } else {
+                let col_shift = if sel_start.line == sel_end.line {
+                    sel_end.col - sel_start.col
+                } else {
+                    sel_end.col
+                };
+                Pos::new(drop.line - removed_lines, drop.col - col_shift)
+            }
+        } else {
+            drop
+        };
+
+        // ── insert at drop position ───────────────────────────────────────────
+        self.move_cursor(adjusted_drop.line, adjusted_drop.col);
+        let ins_start = self.cursor;
+        self.apply_insert(ins_start, text);
+        let ins_end = self.cursor;
+        let ins_seq = self.next_seq;
+        self.next_seq += 1;
+        self.ops.push(crate::session::db::UndoOp {
+            seq: ins_seq,
+            kind: crate::session::db::OpKind::Insert,
+            line_start: ins_start.line as i64,
+            col_start: ins_start.col as i64,
+            line_end: ins_end.line as i64,
+            col_end: ins_end.col as i64,
+            text: text.to_string(),
+            group_id,
+        });
+        self.undo_head = Some(self.ops.len() - 1);
+
+        // Leave last_edit_kind broken so nothing accidentally chains onto this.
+        self.last_edit_kind = None;
+        self.last_edit_time = None;
+
+        self.is_modified = true;
+        self.dirty = true;
+    }
+
     /// Selected text as a String, or empty string if no selection.
     pub fn selected_text(&self) -> String {
         let Some((start, end)) = self.selection_range() else { return String::new() };
@@ -719,6 +795,24 @@ mod tests {
         // "world" = group1, "\n  \n  \nhello" = group2
         assert!(b.undo()); assert_eq!(b.content(), "hello\n  \n  \n");
         assert!(b.undo()); assert_eq!(b.content(), "hello\n  \n  \nworld");
+    }
+
+    #[test]
+    fn test_move_selection_to_atomic_undo() {
+        let mut b = buf("hello world");
+        // Select "hello" (anchor at 0,0, cursor at 0,5).
+        b.move_cursor(0, 0);
+        b.anchor = Some(Pos::new(0, 0));
+        b.move_cursor(0, 5);
+        // Move selection to end of buffer (after " world").
+        b.move_selection_to("hello", Pos::new(0, 11));
+        assert_eq!(b.content(), " worldhello");
+        // Single undo should restore the original content atomically.
+        assert!(b.undo());
+        assert_eq!(b.content(), "hello world");
+        // Single redo should re-apply the move atomically.
+        assert!(b.redo());
+        assert_eq!(b.content(), " worldhello");
     }
 
     #[test]

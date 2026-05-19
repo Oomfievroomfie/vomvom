@@ -353,37 +353,7 @@ impl AppState {
                     let text = self.session.active().selected_text();
                     let buf = self.session.active_mut();
                     buf.break_undo_group();
-
-                    // Adjust drop position for the deletion that will shift chars.
-                    let adjusted_drop = if drop_pos > sel_end {
-                        // Drop is after selection; deletion shifts it left by the removed char count.
-                        let removed_lines = sel_end.line - sel_start.line;
-                        if drop_pos.line > sel_end.line {
-                            session::buffer::Pos::new(
-                                drop_pos.line - removed_lines,
-                                drop_pos.col,
-                            )
-                        } else {
-                            // Same line as sel_end — shift col by chars removed on that line.
-                            let col_shift = if sel_start.line == sel_end.line {
-                                sel_end.col - sel_start.col
-                            } else {
-                                sel_end.col
-                            };
-                            session::buffer::Pos::new(
-                                drop_pos.line - removed_lines,
-                                drop_pos.col - col_shift,
-                            )
-                        }
-                    } else {
-                        drop_pos
-                    };
-
-                    buf.delete_selection();
-                    buf.clear_selection();
-                    buf.move_cursor(adjusted_drop.line, adjusted_drop.col);
-                    buf.insert(&text);
-                    buf.break_undo_group();
+                    buf.move_selection_to(&text, drop_pos);
                     self.highlight_dirty = true;
                     self.needs_redraw = true;
                 } else {
