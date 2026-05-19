@@ -64,6 +64,10 @@ Do not remove debug prints until the problem is confirmed fixed by actual testin
 
 When a bug is hard to repro interactively, add a replay script that exercises it and take screenshots before and after the operation under test. The screenshot is ground truth; the test passes when the image is correct, not when the code looks right.
 
+## Known issues / TODO
+
+- IME preedit preview is drawn as an overlay at the cursor position (opaque background, underline) but doesn't take up inline space — text after the cursor doesn't shift right. To fix properly: splice the preedit into the highlight token list for the cursor line before building the line node in `update_editor_node`, splitting the token at cursor.col. Strip it on `Ime::Commit` / empty preedit. The preedit must not enter the undo stack or session sync.
+
 ## Style cascade
 
 `compute_style()` resets non-inherited props to defaults, then applies matching rules sorted by specificity then source order. `NodeDesc.classes` is a `HashSet<String>`.

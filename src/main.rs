@@ -208,11 +208,77 @@ impl AppState {
             paint_selection(&mut self.canvas, &lb, &self.doc.root, sel_start, sel_end, scroll, MONO_BYTES, mono_font, self.editor_font_size, self.grid_snap);
         }
 
+        let mut cursor_screen_pos: Option<(f32, f32)> = None;
         if buf.cursor.line >= scroll {
             let line_text = buf.line(buf.cursor.line);
             let layout_line = buf.cursor.line - scroll;
             let cursors = vec![(layout_line, buf.cursor.col, line_text.as_str())];
-            paint_cursors_with_text(&mut self.canvas, &lb, &self.doc.root, &cursors, MONO_BYTES, mono_font, self.editor_font_size, self.grid_snap);
+            cursor_screen_pos = paint_cursors_with_text(&mut self.canvas, &lb, &self.doc.root, &cursors, MONO_BYTES, mono_font, self.editor_font_size, self.grid_snap);
+        }
+
+        if let Some((cx, cy)) = cursor_screen_pos {
+            let font_size = self.editor_font_size;
+            let line_h = font_size * 1.4;
+
+            // Tell the OS where to anchor the IME candidate window.
+            if let Some(ref w) = self.window {
+                w.set_ime_cursor_area(
+                    winit::dpi::LogicalPosition::new(cx, cy + line_h),
+                    winit::dpi::LogicalSize::new(1.0_f32, 1.0_f32),
+                );
+            }
+
+            // Draw preedit text inline at cursor with an underline.
+            if !self.ime_preedit.is_empty() {
+                let preedit = self.ime_preedit.clone();
+                let preedit_w = render::glyph_cache::measure_shaped_width(MONO_BYTES, &preedit, font_size);
+                let preedit_color = femtovg::Color::rgbaf(0.9, 0.9, 1.0, 1.0);
+                let underline_color = femtovg::Color::rgbaf(0.9, 0.9, 1.0, 0.7);
+
+                // Background tint behind preedit text.
+                let mut bg_path = Path::new();
+                bg_path.rect(cx, cy, preedit_w, line_h);
+                self.canvas.fill_path(&bg_path, &Paint::color(femtovg::Color::rgb(33, 33, 41)));
+
+                // Draw the preedit glyphs directly using the glyph cache.
+                self.glyph_cache.ensure_atlas(&mut self.canvas);
+                let runs = render::glyph_cache::shape_line(
+                    &mut self.glyph_cache, MONO_BYTES, 1, &preedit, font_size, self.hint, self.grid_snap,
+                );
+                self.glyph_cache.flush(&mut self.canvas);
+
+                if let Some(atlas_id) = self.glyph_cache.atlas {
+                    let atlas_f = render::glyph_cache::ATLAS_SIZE as f32;
+                    let baseline_y = cy + font_size;
+                    let mut pen_x = cx;
+                    for run in &runs {
+                        for g in &run.glyphs {
+                            if let Some(cg) = self.glyph_cache.get_cached(g.glyph_id, run.font_index, font_size) {
+                                if cg.width > 0 && cg.height > 0 {
+                                    let gx = (pen_x + g.x_offset + cg.bearing_x as f32).round();
+                                    let gy = (baseline_y - g.y_offset - cg.bearing_y as f32).round();
+                                    let gw = cg.width as f32;
+                                    let gh = cg.height as f32;
+                                    let ox = gx - cg.atlas_x as f32;
+                                    let oy = gy - cg.atlas_y as f32;
+                                    let paint = Paint::image_tint(atlas_id, ox, oy, atlas_f, atlas_f, 0.0, preedit_color)
+                                        .with_anti_alias(false);
+                                    let mut path = Path::new();
+                                    path.rect(gx, gy, gw, gh);
+                                    self.canvas.fill_path(&path, &paint);
+                                }
+                            }
+                            pen_x += g.x_advance;
+                        }
+                    }
+                }
+
+                // Underline across the full preedit width.
+                let underline_y = cy + line_h - 1.0;
+                let mut ul_path = Path::new();
+                ul_path.rect(cx, underline_y, preedit_w, 1.5);
+                self.canvas.fill_path(&ul_path, &Paint::color(underline_color));
+            }
         }
 
         // During selection drag-and-drop, paint a distinct drop-cursor at drag pos.
@@ -1672,6 +1738,7 @@ fn x_for_col_on_row(
 }
 
 /// Paint cursor bars at the given (line, col, text) positions over the editor area.
+/// Returns the screen position of the first cursor, if any, for IME placement.
 pub fn paint_cursors_with_text(
     canvas: &mut Canvas<OpenGl>,
     lb: &LayoutBox,
@@ -1681,12 +1748,13 @@ pub fn paint_cursors_with_text(
     _mono_font: Option<FontId>,
     font_size: f32,
     grid_snap: bool,
-) {
-    let Some(editor_lb) = lb.children.get(2) else { return };
-    let Some(editor_node) = doc_root.children().get(2) else { return };
+) -> Option<(f32, f32)> {
+    let Some(editor_lb) = lb.children.get(2) else { return None };
+    let Some(editor_node) = doc_root.children().get(2) else { return None };
 
     let cursor_color = femtovg::Color::rgbaf(0.9, 0.9, 1.0, 0.85);
     let line_h = font_size * 1.4;
+    let mut first_pos: Option<(f32, f32)> = None;
 
     for &(line_idx, col, _line_text) in cursors {
         let Some(line_lb) = editor_lb.children.get(line_idx + 1) else { continue };
@@ -1699,11 +1767,15 @@ pub fn paint_cursors_with_text(
         let cursor_x = line_origin_x + x_rel;
         let cursor_y = line_lb.border_box.y;
 
+        if first_pos.is_none() { first_pos = Some((cursor_x, cursor_y)); }
+
         let mut path = Path::new();
         path.rect(cursor_x, cursor_y, 2.0, line_h);
         let paint = Paint::color(cursor_color);
         canvas.fill_path(&path, &paint);
     }
+
+    first_pos
 }
 
 /// Paint a drop-target cursor bar (orange, slightly wider) for drag-and-drop.
