@@ -56,19 +56,17 @@ impl<'a> PaintContext<'a> {
         let mut pen_x = 0.0_f32;
 
         for run in &runs {
-            // Find which span owns this run's start byte for color lookup.
-            let color = {
-                let run_start = run.text_range.start;
-                let si = span_starts.partition_point(|&s| s <= run_start).saturating_sub(1).min(span_starts.len().saturating_sub(1));
-                span_colors.get(si).copied().unwrap_or(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })
-            };
-            let tint = femtovg::Color::rgbaf(color.r, color.g, color.b, color.a);
-
             let font_data_for_run: &[u8] = run.font_bytes.as_deref()
                 .map(|b| b.as_slice())
                 .unwrap_or(font_data);
 
             for g in &run.glyphs {
+                // Look up color per glyph using its absolute byte position in full_text.
+                let abs_byte = run.text_range.start + g.cluster as usize;
+                let si = span_starts.partition_point(|&s| s <= abs_byte).saturating_sub(1).min(span_starts.len().saturating_sub(1));
+                let color = span_colors.get(si).copied().unwrap_or(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+                let tint = femtovg::Color::rgbaf(color.r, color.g, color.b, color.a);
+
                 if let Some(cg) = self.glyph_cache.get_cached(g.glyph_id, run.font_index, font_size) {
                     if cg.width > 0 && cg.height > 0 {
                         let gx = (line_origin_x + pen_x + g.x_offset + cg.bearing_x as f32).round();
