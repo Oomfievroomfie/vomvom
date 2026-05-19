@@ -73,6 +73,10 @@ pub struct AppState {
     debug_boxes: bool,
     scrollbar_drag: bool,
     editor_drag: bool,
+    // Pixel position of the mouse press that started editor_drag, plus the logical click position.
+    // Used to delay anchor-setting until drag threshold is met.
+    editor_press_pos: Option<(f32, f32)>,
+    editor_press_click: Option<session::buffer::Pos>,
     // Drag-and-drop move of the current selection.
     // Set on press-inside-selection; committed on release.
     selection_drag: bool,
@@ -127,6 +131,8 @@ impl AppState {
             debug_boxes: false,
             scrollbar_drag: false,
             editor_drag: false,
+            editor_press_pos: None,
+            editor_press_click: None,
             selection_drag: false,
             selection_drag_pos: None,
             highlight_cache,
@@ -293,12 +299,14 @@ impl AppState {
                     buf.set_anchor_if_none();
                 } else {
                     buf.clear_selection();
-                    buf.anchor = Some(click_pos);
+                    // Don't set anchor yet — defer until drag threshold is met.
                 }
                 buf.move_cursor(line, col);
                 buf.break_undo_group();
                 self.cursor_ideal_x = None;
                 self.editor_drag = true;
+                self.editor_press_pos = Some((mx, my));
+                self.editor_press_click = Some(click_pos);
                 let editor_h = editor_content_height(win_h);
                 scroll_to_cursor(&mut self.session, editor_h, self.editor_font_size);
                 self.needs_redraw = true;
@@ -333,6 +341,18 @@ impl AppState {
             if let Some(ref lb) = self.last_layout.clone() {
                 let mono_font = self.femtovg_fonts.filter(|_| self.use_femtovg).map(|(_, m)| m);
                 if let Some((line, col)) = hit_test_editor(&mut self.canvas, lb, &self.doc.root, &self.session, mx, my, MONO_BYTES, mono_font, self.editor_font_size, self.grid_snap) {
+                    let drag_pos = session::buffer::Pos::new(line, col);
+                    // Re-evaluate selection conditions on every drag event.
+                    if let (Some((px, py)), Some(press_click)) = (self.editor_press_pos, self.editor_press_click) {
+                        let dx = mx - px;
+                        let dy = my - py;
+                        let moved = (dx * dx + dy * dy).sqrt();
+                        if moved >= 3.0 && drag_pos != press_click {
+                            self.session.active_mut().anchor = Some(press_click);
+                        } else {
+                            self.session.active_mut().anchor = None;
+                        }
+                    }
                     self.session.active_mut().move_cursor(line, col);
                     self.cursor_ideal_x = None;
                     let editor_h = editor_content_height(win_h);
@@ -348,6 +368,9 @@ impl AppState {
         self.last_input = Some(Instant::now());
         self.scrollbar_drag = false;
         self.editor_drag = false;
+
+        self.editor_press_pos = None;
+        self.editor_press_click = None;
 
         if self.selection_drag {
             self.selection_drag = false;
@@ -723,6 +746,8 @@ impl ApplicationHandler for App {
             debug_boxes: false,
             scrollbar_drag: false,
             editor_drag: false,
+            editor_press_pos: None,
+            editor_press_click: None,
             selection_drag: false,
             selection_drag_pos: None,
             highlight_cache,
