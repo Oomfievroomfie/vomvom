@@ -586,25 +586,55 @@ fn shape_line_inner(
         let mut total_advance = 0.0_f32;
 
         let is_fallback = raw.font_bytes.is_some();
+
+        // Collect raw advances first.
         for (info, pos) in infos.iter().zip(positions.iter()) {
             let x_adv_raw = pos.x_advance as f32 * scale;
-            // Snap advances to the primary-font 'e' grid, same as the old layout_text path.
-            // Zero-advance glyphs (combining diacritics) pass through unchanged.
-            let x_adv = if is_fallback {
-                round_to_e(x_adv_raw, e_width)
-            } else {
-                x_adv_raw
-            };
             let x_off = pos.x_offset as f32 * scale;
             let y_off = pos.y_offset as f32 * scale;
             glyphs.push(ShapedGlyphInfo {
                 glyph_id: info.glyph_id as u16,
-                x_advance: x_adv,
+                x_advance: x_adv_raw,
                 x_offset: x_off,
                 y_offset: y_off,
                 cluster: info.cluster,
             });
-            total_advance += x_adv;
+            total_advance += x_adv_raw;
+        }
+
+        if is_fallback {
+            // Snap fallback advances to the monospace grid, but respect cursive grouping.
+            // Group consecutive glyphs that are attached (same cluster, or any glyph in
+            // the group has a non-zero x_offset indicating GPOS attachment to a neighbour).
+            // Each independent group is snapped as a unit; within a group advances are
+            // scaled proportionally so cursive proportions are preserved.
+            // Japanese: every char is its own cluster with no x_offset → per-char snap.
+            // Arabic word: multiple glyphs share clusters / have x_offsets → group snap.
+
+            // Build groups: start a new group when cluster changes AND no x_offset on
+            // the current glyph (x_offset means it's positioned relative to a base glyph).
+            let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
+            let mut group_start = 0usize;
+            for i in 1..glyphs.len() {
+                let same_cluster = glyphs[i].cluster == glyphs[i - 1].cluster;
+                let has_offset = glyphs[i].x_offset != 0.0 || glyphs[i].y_offset != 0.0;
+                if !same_cluster && !has_offset {
+                    groups.push(group_start..i);
+                    group_start = i;
+                }
+            }
+            groups.push(group_start..glyphs.len());
+
+            total_advance = 0.0;
+            for group in &groups {
+                let group_raw: f32 = glyphs[group.clone()].iter().map(|g| g.x_advance).sum();
+                let snapped = round_to_e(group_raw, e_width);
+                let scale_factor = if group_raw > 0.0 { snapped / group_raw } else { 1.0 };
+                for g in &mut glyphs[group.clone()] {
+                    g.x_advance *= scale_factor;
+                    total_advance += g.x_advance;
+                }
+            }
         }
 
         // Rasterize glyphs if we have a cache.
