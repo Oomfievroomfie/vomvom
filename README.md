@@ -4,7 +4,9 @@
 
 # vomvom
 
-A text editor written in Rust. Early stage.
+A text editor entirely vibecoded in Rust. Early stage.
+
+<img width="598" height="594" alt="2026-05-19_01-59-34" src="https://github.com/user-attachments/assets/f7b46a41-06d7-4848-9d78-973e065f6e99" />
 
 The UI uses a custom HTML/CSS-alike layout engine: parse `.htmv` markup, apply a cascade from a `.cssv` stylesheet (selectors, specificity, inheritance), lay out nodes in block/flex/inline, then paint with femtovg. The toolbar and menus are `.htmv` files compiled in with `include_str!`.
 
