@@ -72,6 +72,10 @@ pub struct AppState {
     debug_boxes: bool,
     scrollbar_drag: bool,
     editor_drag: bool,
+    // Drag-and-drop move of the current selection.
+    // Set on press-inside-selection; committed on release.
+    selection_drag: bool,
+    selection_drag_pos: Option<session::buffer::Pos>,
     pub highlight_cache: std::collections::HashMap<i64, Vec<Vec<(String, &'static str)>>>,
     last_input: Option<Instant>,
     pub editor_font_size: f32,
@@ -121,6 +125,8 @@ impl AppState {
             debug_boxes: false,
             scrollbar_drag: false,
             editor_drag: false,
+            selection_drag: false,
+            selection_drag_pos: None,
             highlight_cache,
             last_input: None,
             editor_font_size,
@@ -200,6 +206,16 @@ impl AppState {
             paint_cursors_with_text(&mut self.canvas, &lb, &self.doc.root, &cursors, MONO_BYTES, mono_font, self.editor_font_size);
         }
 
+        // During selection drag-and-drop, paint a distinct drop-cursor at drag pos.
+        if let Some(drop_pos) = self.selection_drag_pos {
+            if drop_pos.line >= scroll {
+                let line_text = buf.line(drop_pos.line);
+                let layout_line = drop_pos.line - scroll;
+                let cursors = vec![(layout_line, drop_pos.col, line_text.as_str())];
+                paint_drop_cursor(&mut self.canvas, &lb, &self.doc.root, &cursors, MONO_BYTES, mono_font, self.editor_font_size);
+            }
+        }
+
         self.canvas.flush();
         self.gl_surface.swap_buffers(&self.gl_context).unwrap();
     }
@@ -254,20 +270,32 @@ impl AppState {
             let mono_font = self.femtovg_fonts.filter(|_| self.use_femtovg).map(|(_, m)| m);
             hit_test_editor(&mut self.canvas, lb, &self.doc.root, &self.session, mx, my, MONO_BYTES, mono_font, self.editor_font_size)
         } {
-            let buf = self.session.active_mut();
-            if shift {
-                buf.set_anchor_if_none();
+            let click_pos = session::buffer::Pos::new(line, col);
+            let inside_selection = !shift && self.session.active().selection_range()
+                .map(|(start, end)| click_pos >= start && click_pos <= end)
+                .unwrap_or(false);
+
+            if inside_selection {
+                // Begin a drag-and-drop move; don't touch the selection yet.
+                self.selection_drag = true;
+                self.selection_drag_pos = Some(click_pos);
+                self.needs_redraw = true;
             } else {
-                buf.clear_selection();
-                buf.anchor = Some(session::buffer::Pos::new(line, col));
+                let buf = self.session.active_mut();
+                if shift {
+                    buf.set_anchor_if_none();
+                } else {
+                    buf.clear_selection();
+                    buf.anchor = Some(click_pos);
+                }
+                buf.move_cursor(line, col);
+                buf.break_undo_group();
+                self.cursor_ideal_x = None;
+                self.editor_drag = true;
+                let editor_h = editor_content_height(win_h);
+                scroll_to_cursor(&mut self.session, editor_h, self.editor_font_size);
+                self.needs_redraw = true;
             }
-            buf.move_cursor(line, col);
-            buf.break_undo_group();
-            self.cursor_ideal_x = None;
-            self.editor_drag = true;
-            let editor_h = editor_content_height(win_h);
-            scroll_to_cursor(&mut self.session, editor_h, self.editor_font_size);
-            self.needs_redraw = true;
         }
     }
 
@@ -283,6 +311,14 @@ impl AppState {
                     let track_lb = track_lb.clone();
                     let scroll = scrollbar_y_to_scroll(&track_lb, &self.session, my, win_h, self.editor_font_size);
                     self.session.active_mut().scroll_line = scroll;
+                    self.needs_redraw = true;
+                }
+            }
+        } else if self.selection_drag {
+            if let Some(ref lb) = self.last_layout.clone() {
+                let mono_font = self.femtovg_fonts.filter(|_| self.use_femtovg).map(|(_, m)| m);
+                if let Some((line, col)) = hit_test_editor(&mut self.canvas, lb, &self.doc.root, &self.session, mx, my, MONO_BYTES, mono_font, self.editor_font_size) {
+                    self.selection_drag_pos = Some(session::buffer::Pos::new(line, col));
                     self.needs_redraw = true;
                 }
             }
@@ -305,6 +341,62 @@ impl AppState {
         self.last_input = Some(Instant::now());
         self.scrollbar_drag = false;
         self.editor_drag = false;
+
+        if self.selection_drag {
+            self.selection_drag = false;
+            if let (Some(drop_pos), Some((sel_start, sel_end))) = (
+                self.selection_drag_pos.take(),
+                self.session.active().selection_range(),
+            ) {
+                // Only act if the drop lands outside the selection.
+                if drop_pos < sel_start || drop_pos > sel_end {
+                    let text = self.session.active().selected_text();
+                    let buf = self.session.active_mut();
+                    buf.break_undo_group();
+
+                    // Adjust drop position for the deletion that will shift chars.
+                    let adjusted_drop = if drop_pos > sel_end {
+                        // Drop is after selection; deletion shifts it left by the removed char count.
+                        let removed_lines = sel_end.line - sel_start.line;
+                        if drop_pos.line > sel_end.line {
+                            session::buffer::Pos::new(
+                                drop_pos.line - removed_lines,
+                                drop_pos.col,
+                            )
+                        } else {
+                            // Same line as sel_end — shift col by chars removed on that line.
+                            let col_shift = if sel_start.line == sel_end.line {
+                                sel_end.col - sel_start.col
+                            } else {
+                                sel_end.col
+                            };
+                            session::buffer::Pos::new(
+                                drop_pos.line - removed_lines,
+                                drop_pos.col - col_shift,
+                            )
+                        }
+                    } else {
+                        drop_pos
+                    };
+
+                    buf.delete_selection();
+                    buf.clear_selection();
+                    buf.move_cursor(adjusted_drop.line, adjusted_drop.col);
+                    buf.insert(&text);
+                    buf.break_undo_group();
+                    self.highlight_dirty = true;
+                    self.needs_redraw = true;
+                } else {
+                    // Dropped inside selection — treat as plain click, just move cursor.
+                    let buf = self.session.active_mut();
+                    buf.clear_selection();
+                    buf.move_cursor(drop_pos.line, drop_pos.col);
+                    self.needs_redraw = true;
+                }
+            } else {
+                self.selection_drag_pos = None;
+            }
+        }
     }
 
     /// Handle mouse wheel scroll.
@@ -653,6 +745,8 @@ impl ApplicationHandler for App {
             debug_boxes: false,
             scrollbar_drag: false,
             editor_drag: false,
+            selection_drag: false,
+            selection_drag_pos: None,
             highlight_cache,
             last_input: None,
             editor_font_size,
@@ -1636,6 +1730,55 @@ pub fn paint_cursors_with_text(
     }
 }
 
+/// Paint a drop-target cursor bar (orange, slightly wider) for drag-and-drop.
+fn paint_drop_cursor(
+    canvas: &mut Canvas<OpenGl>,
+    lb: &LayoutBox,
+    doc_root: &Node,
+    cursors: &[(usize, usize, &str)],
+    mono_data: &'static [u8],
+    mono_font: Option<FontId>,
+    font_size: f32,
+) {
+    let Some(editor_lb) = lb.children.get(2) else { return };
+    let Some(editor_node) = doc_root.children().get(2) else { return };
+
+    let drop_color = femtovg::Color::rgbaf(1.0, 0.65, 0.1, 0.95);
+    let line_h = font_size * 1.4;
+
+    for &(line_idx, col, _line_text) in cursors {
+        let Some(line_lb) = editor_lb.children.get(line_idx + 1) else { continue };
+        let Some(line_node) = editor_node.children().get(line_idx + 1) else { continue };
+
+        let mut char_offset = 0usize;
+        let mut cursor_x = line_lb.content.x;
+        let mut cursor_y = line_lb.border_box.y;
+
+        let spans = line_node.children();
+        for (si, span_node) in spans.iter().enumerate() {
+            let span_text = span_node.children().first()
+                .and_then(|n| if let render::tree::NodeContent::Text(t) = &n.content { Some(t.as_str()) } else { None })
+                .unwrap_or("");
+            let span_chars = span_text.chars().count();
+            let Some(span_lb) = line_lb.children.get(si) else { break };
+
+            if col <= char_offset + span_chars || si + 1 == spans.len() {
+                let intra = col.saturating_sub(char_offset).min(span_chars);
+                let prefix: String = span_text.chars().take(intra).collect();
+                let x_off = text_prefix_width(canvas, mono_font, mono_data, &prefix, font_size);
+                cursor_x = span_lb.border_box.x + x_off;
+                cursor_y = span_lb.border_box.y;
+                break;
+            }
+            char_offset += span_chars;
+        }
+
+        let mut path = Path::new();
+        path.rect(cursor_x - 1.0, cursor_y, 3.0, line_h);
+        canvas.fill_path(&path, &Paint::color(drop_color));
+    }
+}
+
 /// Returns the track LayoutBox if mx,my is inside the scrollbar track.
 fn scrollbar_track_lb<'a>(lb: &'a LayoutBox, mx: f32, my: f32) -> Option<&'a LayoutBox> {
     let editor_lb = lb.children.get(2)?;
@@ -1810,8 +1953,18 @@ fn run_replay_script(script: &str) {
                 ScreenshotNamed("after_drag"),
             ]);
         }
+        "drag-drop" => {
+            replay::run_script("drag_drop", 1024, 768, vec![
+                // Select "mod render" on line 2 (y≈100) by dragging, then drag it elsewhere.
+                DragFrom(50.0, 100.0, 160.0, 100.0),
+                ScreenshotNamed("selection"),
+                // Drag selected text down to line 4 (y≈128).
+                DragFrom(80.0, 100.0, 80.0, 128.0),
+                ScreenshotNamed("after_drop"),
+            ]);
+        }
         _ => {
-            eprintln!("[replay] unknown script {:?}. Available: close-tab, type-text, drag-select", script);
+            eprintln!("[replay] unknown script {:?}. Available: close-tab, type-text, drag-select, drag-drop", script);
         }
     }
 }

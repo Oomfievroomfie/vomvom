@@ -137,16 +137,19 @@ pub fn run_script(name: &str, width: u32, height: u32, events: Vec<ScriptedEvent
                 // Render first so hit-testing uses current layout.
                 state.do_render();
                 state.on_mouse_press(mx, my, false);
+                state.on_mouse_release();
             }
             ScriptedEvent::ClickAt(x, y) => {
                 state.mouse_pos = (*x, *y);
                 state.do_render();
                 state.on_mouse_press(*x, *y, false);
+                state.on_mouse_release();
             }
             ScriptedEvent::ShiftClickAt(x, y) => {
                 state.mouse_pos = (*x, *y);
                 state.do_render();
                 state.on_mouse_press(*x, *y, true);
+                state.on_mouse_release();
             }
             ScriptedEvent::DragFrom(x1, y1, x2, y2) => {
                 state.mouse_pos = (*x1, *y1);
@@ -161,6 +164,7 @@ pub fn run_script(name: &str, width: u32, height: u32, events: Vec<ScriptedEvent
                     state.do_render();
                     state.on_mouse_drag(mx, my);
                 }
+                state.on_mouse_release();
             }
             ScriptedEvent::Undo => {
                 state.session.active_mut().undo();
