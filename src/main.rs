@@ -1937,7 +1937,7 @@ fn run_replay_script(script: &str) {
         "japanese-text" => {
             replay::run_script("japanese_text", 1024, 768, vec![
                 ScreenshotNamed("initial"),
-                Type("// Japanese: こんにちは世界\n// Mixed: hello 日本語 world\n// CJK: 日本語テスト\n"),
+                Type("// Japanese: こんにちは世界\n// Mixed: hello 日本語 world\n// CJK: 日本語テスト\n// Align: ああああ\n// Align: 12345678\n"),
                 ScreenshotNamed("after_type"),
             ]);
         }

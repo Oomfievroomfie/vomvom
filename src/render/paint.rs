@@ -44,24 +44,40 @@ impl<'a> PaintContext<'a> {
         let metrics = font_ref.glyph_metrics(&[]).scale(font_size);
         let e_width = metrics.advance_width(charmap.map('e'));
 
-        // Split text into font runs; each run is drawn with a single fill_text call.
+        // Draw primary-font chars in batched runs for efficiency.
+        // Fallback-font chars are drawn one at a time at our computed pen_x so that
+        // our rounded advance widths control positioning, not femtovg's internal shaping.
         let mut pen_x = x;
-        let mut run_start_x = x;
-        let mut run_font_id = primary_font_id;
-        let mut run_text = String::new();
+        let mut primary_run_start_x = x;
+        let mut primary_run = String::new();
+
+        let flush_primary = |canvas: &mut Canvas<OpenGl>, run: &mut String, rx: f32| {
+            if run.is_empty() { return; }
+            let mut paint = Paint::color(tint);
+            paint.set_font(&[primary_font_id]);
+            paint.set_font_size(font_size);
+            let _ = canvas.fill_text(rx, y, run.as_str(), &paint);
+            run.clear();
+        };
 
         for ch in text.chars() {
             let gid = charmap.map(ch);
-            let (ch_font_id, adv) = if gid != 0 {
-                (primary_font_id, metrics.advance_width(gid))
+            if gid != 0 {
+                // Primary font — batch into run.
+                let adv = metrics.advance_width(gid);
+                primary_run.push(ch);
+                pen_x += adv;
             } else {
-                let fb = crate::render::glyph_cache::os_font_for_char(ch);
+                // Fallback font — flush primary run first, then draw this char individually.
+                flush_primary(self.canvas, &mut primary_run, primary_run_start_x);
+                primary_run_start_x = pen_x; // will be updated below
+
+                let fb = os_font_for_char(ch);
                 let fb_font_id = match fb {
                     Some((ref bytes, face_idx)) => {
                         let key = (Arc::as_ptr(bytes) as usize, face_idx);
                         *self.fallback_femtovg_cache.entry(key).or_insert_with(|| {
-                            self.canvas.add_font_mem(bytes)
-                                .unwrap_or(primary_font_id)
+                            self.canvas.add_font_mem(bytes).unwrap_or(primary_font_id)
                         })
                     }
                     None => primary_font_id,
@@ -72,33 +88,18 @@ impl<'a> PaintContext<'a> {
                         fr.glyph_metrics(&[]).scale(font_size).advance_width(gid2)
                     })
                 }).unwrap_or(e_width);
-                let adv = {
-                    let m = (raw_adv / e_width).round().max(1.0);
-                    m * e_width
-                };
-                (fb_font_id, adv)
-            };
+                let adv = (raw_adv / e_width).round().max(1.0) * e_width;
 
-            if ch_font_id != run_font_id {
-                if !run_text.is_empty() {
-                    let mut paint = Paint::color(tint);
-                    paint.set_font(&[run_font_id]);
-                    paint.set_font_size(font_size);
-                    let _ = self.canvas.fill_text(run_start_x, y, &run_text, &paint);
-                    run_text.clear();
-                }
-                run_start_x = pen_x;
-                run_font_id = ch_font_id;
+                // Draw single fallback char at our pen_x.
+                let mut paint = Paint::color(tint);
+                paint.set_font(&[fb_font_id]);
+                paint.set_font_size(font_size);
+                let _ = self.canvas.fill_text(pen_x, y, &ch.to_string(), &paint);
+                pen_x += adv;
+                primary_run_start_x = pen_x;
             }
-            run_text.push(ch);
-            pen_x += adv;
         }
-        if !run_text.is_empty() {
-            let mut paint = Paint::color(tint);
-            paint.set_font(&[run_font_id]);
-            paint.set_font_size(font_size);
-            let _ = self.canvas.fill_text(run_start_x, y, &run_text, &paint);
-        }
+        flush_primary(self.canvas, &mut primary_run, primary_run_start_x);
     }
 
     fn draw_text(&mut self, x: f32, y: f32, text: &str, color: Color, font_size: f32, family: &str) {
