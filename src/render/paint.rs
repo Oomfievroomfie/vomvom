@@ -50,9 +50,15 @@ impl<'a> PaintContext<'a> {
         };
         let atlas_f = crate::render::glyph_cache::ATLAS_SIZE as f32;
 
-        // Determine the x origin of the line (first span's border_box.x).
-        let line_origin_x = line_lb.children.first().map_or(line_lb.border_box.x, |s| s.border_box.x);
-        let baseline_y = line_lb.border_box.y + font_size;
+        // Build span layout positions: border_box.x and border_box.y for each span.
+        // For wrapped lines each span has its own row position from layout.
+        let span_lbs: Vec<Option<&LayoutBox>> = (0..line_node.children().len())
+            .map(|i| line_lb.children.get(i))
+            .collect();
+
+        // Pen x is tracked per span: reset to 0 each time we enter a new span,
+        // and added to that span's layout x. This handles wrapped lines correctly.
+        let mut cur_si = usize::MAX;
         let mut pen_x = 0.0_f32;
 
         for run in &runs {
@@ -61,15 +67,28 @@ impl<'a> PaintContext<'a> {
                 .unwrap_or(font_data);
 
             for g in &run.glyphs {
-                // Look up color per glyph using its absolute byte position in full_text.
                 let abs_byte = run.text_range.start + g.cluster as usize;
                 let si = span_starts.partition_point(|&s| s <= abs_byte).saturating_sub(1).min(span_starts.len().saturating_sub(1));
+
+                // When crossing into a new span, reset pen to that span's layout x.
+                if si != cur_si {
+                    if let Some(Some(slb)) = span_lbs.get(si) {
+                        pen_x = slb.border_box.x;
+                    }
+                    cur_si = si;
+                }
+
                 let color = span_colors.get(si).copied().unwrap_or(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
                 let tint = femtovg::Color::rgbaf(color.r, color.g, color.b, color.a);
 
+                // baseline_y is per-span since rows have different y positions.
+                let span_y = span_lbs.get(si).and_then(|s| *s)
+                    .map_or(line_lb.border_box.y, |slb| slb.border_box.y);
+                let baseline_y = span_y + font_size;
+
                 if let Some(cg) = self.glyph_cache.get_cached(g.glyph_id, run.font_index, font_size) {
                     if cg.width > 0 && cg.height > 0 {
-                        let gx = (line_origin_x + pen_x + g.x_offset + cg.bearing_x as f32).round();
+                        let gx = (pen_x + g.x_offset + cg.bearing_x as f32).round();
                         let gy = (baseline_y - g.y_offset - cg.bearing_y as f32).round();
                         let gw = cg.width as f32;
                         let gh = cg.height as f32;
@@ -82,7 +101,7 @@ impl<'a> PaintContext<'a> {
                         self.canvas.fill_path(&path, &paint);
                     }
                 }
-                let _ = font_data_for_run; // used implicitly via glyph_cache key
+                let _ = font_data_for_run;
                 pen_x += g.x_advance;
             }
         }
