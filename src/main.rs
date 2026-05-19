@@ -1930,7 +1930,7 @@ fn run_replay_script(script: &str) {
         "japanese-text" => {
             replay::run_script("japanese_text", 1024, 768, vec![
                 ScreenshotNamed("initial"),
-                Type("// Japanese: こんにちは世界\n// Mixed: hello 日本語 world\n// CJK: 日本語テスト\n// Align: ああああ|\n// Align: 12345678|\n"),
+                Type("// Japanese: こんにちは世界\n// Mixed: hello 日本語 world\n// CJK: 日本語テスト\n// Align: ああああ|\n// Align: 12345678|\n// Arabic: ٱلرَّحۡمَٰنِ ٱلرَّحِيمِ\n"),
                 ScreenshotNamed("after_type"),
                 MoveCursor(10, 9999), // end of "// Align: ああああ|"
                 ScreenshotNamed("cursor_end_of_jp"),

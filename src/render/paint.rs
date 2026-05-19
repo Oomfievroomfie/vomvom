@@ -88,7 +88,7 @@ impl<'a> PaintContext<'a> {
                         fr.glyph_metrics(&[]).scale(font_size).advance_width(gid2)
                     })
                 }).unwrap_or(e_width);
-                let adv = (raw_adv / e_width).round().max(1.0) * e_width;
+                let adv = if raw_adv == 0.0 { 0.0 } else { (raw_adv / e_width).round().max(1.0) * e_width };
 
                 // Draw single fallback char at our pen_x.
                 let mut paint = Paint::color(tint);

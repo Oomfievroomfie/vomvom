@@ -68,7 +68,7 @@ impl FallbackFontDb {
             return None;
         }
         let adv = font_ref.glyph_metrics(&[]).scale(size_px).advance_width(gid);
-        if adv <= 0.0 {
+        if adv < 0.0 {
             return None;
         }
         // Assign a stable font_index for this fontdb face.
@@ -82,7 +82,9 @@ impl FallbackFontDb {
 }
 
 /// Round `raw` to the nearest positive multiple of `e_width`.
+/// Zero-advance characters (combining diacritics etc.) pass through unchanged.
 fn round_to_e(raw: f32, e_width: f32) -> f32 {
+    if raw == 0.0 { return 0.0; }
     let multiples = (raw / e_width).round().max(1.0);
     multiples * e_width
 }
