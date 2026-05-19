@@ -117,6 +117,7 @@ pub fn run_script(name: &str, width: u32, height: u32, events: Vec<ScriptedEvent
             ScriptedEvent::Type(text) => {
                 state.session.active_mut().insert(text);
                 rebuild_highlight_cache(&mut state.highlight_cache, &state.session);
+                state.do_render();
             }
             ScriptedEvent::Backspace => {
                 state.session.active_mut().backspace();

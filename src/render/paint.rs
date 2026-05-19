@@ -1,10 +1,13 @@
 // Paint pass — walks LayoutBox tree and issues femtovg draw calls.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use femtovg::{Canvas, renderer::OpenGl, Paint, Path, FontId};
 use crate::render::style::{Color, Display, Overflow};
 use crate::render::tree::{Node, NodeContent};
 use crate::render::layout::{LayoutBox, Rect};
-use crate::render::glyph_cache::{GlyphCache, layout_text};
+use crate::render::glyph_cache::{GlyphCache, layout_text, os_font_for_char};
+use swash;
 
 pub struct PaintContext<'a> {
     pub canvas: &'a mut Canvas<OpenGl>,
@@ -14,6 +17,8 @@ pub struct PaintContext<'a> {
     pub hint: bool,
     pub use_femtovg: bool,
     pub femtovg_fonts: Option<(FontId, FontId)>, // (sans, mono)
+    // Cache of dynamically loaded fallback FontIds keyed by (Arc ptr, face_index).
+    pub fallback_femtovg_cache: HashMap<(usize, u32), FontId>,
 }
 
 impl<'a> PaintContext<'a> {
@@ -27,13 +32,73 @@ impl<'a> PaintContext<'a> {
     }
 
     fn draw_text_femtovg(&mut self, x: f32, y: f32, text: &str, color: Color, font_size: f32, family: &str) {
-        let Some(font_id) = self.font_id_for(family) else { return };
+        let Some(primary_font_id) = self.font_id_for(family) else { return };
         let tint = color.to_femtovg();
-        let mut paint = Paint::color(tint);
-        paint.set_font(&[font_id]);
-        paint.set_font_size(font_size);
-        // femtovg fill_text baseline is the text baseline; y here is already baseline position
-        let _ = self.canvas.fill_text(x, y, text, &paint);
+
+        let primary_data = if family == "monospace" { self.mono_data } else { self.sans_data };
+        let font_ref = match swash::FontRef::from_index(primary_data, 0) {
+            Some(f) => f,
+            None => return,
+        };
+        let charmap = font_ref.charmap();
+        let metrics = font_ref.glyph_metrics(&[]).scale(font_size);
+        let e_width = metrics.advance_width(charmap.map('e'));
+
+        // Split text into font runs; each run is drawn with a single fill_text call.
+        let mut pen_x = x;
+        let mut run_start_x = x;
+        let mut run_font_id = primary_font_id;
+        let mut run_text = String::new();
+
+        for ch in text.chars() {
+            let gid = charmap.map(ch);
+            let (ch_font_id, adv) = if gid != 0 {
+                (primary_font_id, metrics.advance_width(gid))
+            } else {
+                let fb = crate::render::glyph_cache::os_font_for_char(ch);
+                let fb_font_id = match fb {
+                    Some((ref bytes, face_idx)) => {
+                        let key = (Arc::as_ptr(bytes) as usize, face_idx);
+                        *self.fallback_femtovg_cache.entry(key).or_insert_with(|| {
+                            self.canvas.add_font_mem(bytes)
+                                .unwrap_or(primary_font_id)
+                        })
+                    }
+                    None => primary_font_id,
+                };
+                let raw_adv = fb.as_ref().and_then(|(bytes, fi)| {
+                    swash::FontRef::from_index(bytes.as_ref(), *fi as usize).map(|fr| {
+                        let gid2 = fr.charmap().map(ch);
+                        fr.glyph_metrics(&[]).scale(font_size).advance_width(gid2)
+                    })
+                }).unwrap_or(e_width);
+                let adv = {
+                    let m = (raw_adv / e_width).round().max(1.0);
+                    m * e_width
+                };
+                (fb_font_id, adv)
+            };
+
+            if ch_font_id != run_font_id {
+                if !run_text.is_empty() {
+                    let mut paint = Paint::color(tint);
+                    paint.set_font(&[run_font_id]);
+                    paint.set_font_size(font_size);
+                    let _ = self.canvas.fill_text(run_start_x, y, &run_text, &paint);
+                    run_text.clear();
+                }
+                run_start_x = pen_x;
+                run_font_id = ch_font_id;
+            }
+            run_text.push(ch);
+            pen_x += adv;
+        }
+        if !run_text.is_empty() {
+            let mut paint = Paint::color(tint);
+            paint.set_font(&[run_font_id]);
+            paint.set_font_size(font_size);
+            let _ = self.canvas.fill_text(run_start_x, y, &run_text, &paint);
+        }
     }
 
     fn draw_text(&mut self, x: f32, y: f32, text: &str, color: Color, font_size: f32, family: &str) {
@@ -58,8 +123,8 @@ impl<'a> PaintContext<'a> {
         let mut pen_x = x;
         let tint = femtovg::Color::rgbaf(color.r, color.g, color.b, color.a);
 
-        for (glyph_id, advance) in &glyphs {
-            if let Some(g) = self.glyph_cache.get_cached(*glyph_id, font_index, font_size) {
+        for (glyph_id, advance, _fallback_bytes, glyph_font_index) in &glyphs {
+            if let Some(g) = self.glyph_cache.get_cached(*glyph_id, *glyph_font_index, font_size) {
                 if g.width > 0 && g.height > 0 {
                     let gx = (pen_x + g.bearing_x as f32).round();
                     let gy = (y - g.bearing_y as f32).round();

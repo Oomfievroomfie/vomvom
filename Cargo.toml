@@ -19,6 +19,7 @@ imgref = "1.12.1"
 rgb = "0.8.53"
 zeno = "0.3.3"
 arboard = "3"
+fontdb = "0.23.0"
 
 [profile.release]
 opt-level = 1

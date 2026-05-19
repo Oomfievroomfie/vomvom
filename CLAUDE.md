@@ -34,6 +34,11 @@ Rust programming text editor. Two core systems:
 
 No memories. Anything that would go in a memory file goes in CLAUDE.md instead.
 
+## Tool use rules
+
+- Never use the Explore subagent for searches that cover a small number of files. Only use it for very wide-cast searches across a large codebase.
+- Never use tail/find/grep/head/sed in complex Bash invocations to read files. Always use the dedicated Read, Glob, and Grep tools instead.
+
 ## Replay system
 
 `cargo run --release -- --replay <script>` runs a scripted headless session and saves PNGs to `replay_screenshots/<name>/`. Available scripts: `close-tab`, `type-text`, `drag-select`, `drag-drop`.
@@ -42,7 +47,16 @@ No memories. Anything that would go in a memory file goes in CLAUDE.md instead.
 
 `ScriptedEvent::DragFrom` calls `on_mouse_press` + `on_mouse_drag` steps + `on_mouse_release`. `ClickAt`/`Click`/`ShiftClickAt` also call `on_mouse_release`. Every event that presses must release.
 
-When writing replay scripts: read the first screenshot to find actual pixel coordinates before writing interaction events. Coordinates in comments are approximate and drift as layout changes.
+### Writing a new replay script
+
+1. Add a match arm in `run_replay_script` in `src/main.rs`, call `replay::run_script("folder_name", 1024, 768, vec![...])`, and add the script name to the available list in the catch-all error message.
+2. Start every script with `ScreenshotNamed("initial")` so you can see the starting state and read pixel coordinates from it before writing any interaction events. Coordinates in comments drift as layout changes — always verify from the actual screenshot.
+3. The demo buffer (active tab) starts with 8 lines of Rust code. `Type("text")` inserts at the cursor (end of buffer by default). Typed text appears immediately on the next screenshot.
+4. For mouse interactions, use `ClickAt(x, y)` for single clicks, `DragFrom(x1, y1, x2, y2)` for click-and-drag. Read the initial screenshot to find real coordinates — toolbar is ~28px tall, tab bar ~28px, editor content starts around y=60.
+5. Take screenshots before and after each operation you're debugging. Name them descriptively with `ScreenshotNamed("label")`.
+6. Run with `cargo run --release -- --replay <script-name>` and read the output PNGs from `replay_screenshots/<folder_name>/`.
+
+Available events: `Type`, `Backspace`, `Delete`, `MoveCursor(line, col)`, `MouseMove`, `Click`, `ClickAt`, `ShiftClickAt`, `DragFrom`, `Undo`, `Redo`, `OpenMenu`, `CloseMenus`, `MenuAction`, `ScrollTo`, `Screenshot`, `ScreenshotNamed`.
 
 ## Debugging
 

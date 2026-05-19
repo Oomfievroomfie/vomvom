@@ -1158,6 +1158,7 @@ pub fn render_frame(
         hint,
         use_femtovg,
         femtovg_fonts,
+        fallback_femtovg_cache: std::collections::HashMap::new(),
     };
     paint_tree_root(&mut ctx, &doc.root, &lb);
 
@@ -1933,8 +1934,15 @@ fn run_replay_script(script: &str) {
                 ScreenshotNamed("after_drop"),
             ]);
         }
+        "japanese-text" => {
+            replay::run_script("japanese_text", 1024, 768, vec![
+                ScreenshotNamed("initial"),
+                Type("// Japanese: こんにちは世界\n// Mixed: hello 日本語 world\n// CJK: 日本語テスト\n"),
+                ScreenshotNamed("after_type"),
+            ]);
+        }
         _ => {
-            eprintln!("[replay] unknown script {:?}. Available: close-tab, type-text, drag-select, drag-drop", script);
+            eprintln!("[replay] unknown script {:?}. Available: close-tab, type-text, drag-select, drag-drop, japanese-text", script);
         }
     }
 }

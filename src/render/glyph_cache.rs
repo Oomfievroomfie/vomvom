@@ -3,6 +3,7 @@
 // Glyphs are stored as premultiplied white-with-alpha so Paint::image composites correctly.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use femtovg::{Canvas, ImageFlags, ImageId, ImageSource, PixelFormat, renderer::OpenGl};
 use imgref::Img;
 use rgb::RGBA8;
@@ -11,6 +12,106 @@ use swash::{
     scale::{ScaleContext, Render, Source, image::Content},
 };
 use zeno::Format;
+
+// --- OS font fallback ---
+
+/// Info about a glyph found in a fallback font.
+pub struct FallbackGlyph {
+    pub glyph_id: u16,
+    pub font_index: u8,       // stable index >= 2 assigned by FallbackFontDb
+    pub bytes: Arc<Vec<u8>>,  // raw font file bytes
+    pub face_index: usize,    // index within a font collection
+    pub advance: f32,
+}
+
+struct FallbackFontDb {
+    db: fontdb::Database,
+    bytes_cache: HashMap<fontdb::ID, Arc<Vec<u8>>>,
+    // Stable font_index (>= 2) assigned per fontdb::ID for use in GlyphKey.
+    index_map: HashMap<fontdb::ID, u8>,
+    next_index: u8,
+}
+
+impl FallbackFontDb {
+    fn new() -> Self {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        FallbackFontDb {
+            db,
+            bytes_cache: HashMap::new(),
+            index_map: HashMap::new(),
+            next_index: 2, // 0=sans, 1=mono are reserved
+        }
+    }
+
+    /// Find `ch` in a system font. Returns full glyph info for rasterization, or None.
+    fn find(&mut self, ch: char, size_px: f32) -> Option<FallbackGlyph> {
+        let ids: Vec<fontdb::ID> = self.db.faces().map(|f| f.id).collect();
+        for id in ids {
+            if let Some(g) = self.glyph_from_face(id, ch, size_px) {
+                return Some(g);
+            }
+        }
+        None
+    }
+
+    fn glyph_from_face(&mut self, id: fontdb::ID, ch: char, size_px: f32) -> Option<FallbackGlyph> {
+        let face_index = self.db.face(id)?.index as usize;
+        if !self.bytes_cache.contains_key(&id) {
+            let bytes = self.db.with_face_data(id, |data, _| Arc::new(data.to_vec()))?;
+            self.bytes_cache.insert(id, bytes);
+        }
+        let bytes = self.bytes_cache.get(&id)?.clone();
+        let font_ref = FontRef::from_index(bytes.as_ref(), face_index)?;
+        let gid = font_ref.charmap().map(ch);
+        if gid == 0 {
+            return None;
+        }
+        let adv = font_ref.glyph_metrics(&[]).scale(size_px).advance_width(gid);
+        if adv <= 0.0 {
+            return None;
+        }
+        // Assign a stable font_index for this fontdb face.
+        let font_index = *self.index_map.entry(id).or_insert_with(|| {
+            let idx = self.next_index;
+            self.next_index = self.next_index.saturating_add(1);
+            idx
+        });
+        Some(FallbackGlyph { glyph_id: gid as u16, font_index, bytes, face_index, advance: adv })
+    }
+}
+
+/// Round `raw` to the nearest positive multiple of `e_width`.
+fn round_to_e(raw: f32, e_width: f32) -> f32 {
+    let multiples = (raw / e_width).round().max(1.0);
+    multiples * e_width
+}
+
+static FALLBACK_DB: OnceLock<Mutex<FallbackFontDb>> = OnceLock::new();
+
+fn fallback_db() -> &'static Mutex<FallbackFontDb> {
+    FALLBACK_DB.get_or_init(|| Mutex::new(FallbackFontDb::new()))
+}
+
+/// Find the OS font that covers `ch` and return its bytes + face_index for loading into femtovg.
+/// Returns None if no system font covers the character.
+pub fn os_font_for_char(ch: char) -> Option<(Arc<Vec<u8>>, u32)> {
+    let mut db = fallback_db().lock().ok()?;
+    let ids: Vec<fontdb::ID> = db.db.faces().map(|f| f.id).collect();
+    for id in ids {
+        let face_index = db.db.face(id)?.index;
+        if !db.bytes_cache.contains_key(&id) {
+            let bytes = db.db.with_face_data(id, |data, _| Arc::new(data.to_vec()))?;
+            db.bytes_cache.insert(id, bytes);
+        }
+        let bytes = db.bytes_cache.get(&id)?.clone();
+        let font_ref = FontRef::from_index(bytes.as_ref(), face_index as usize)?;
+        if font_ref.charmap().map(ch) != 0 {
+            return Some((bytes, face_index as u32));
+        }
+    }
+    None
+}
 
 pub const ATLAS_SIZE: usize = 1024;
 const GLYPH_PAD: usize = 1;
@@ -204,8 +305,13 @@ pub struct FontSlot {
     pub index: u8,
 }
 
-/// Simple horizontal text layout: returns a list of (glyph_id, advance).
-/// Uses swash charmap to map chars to glyph IDs, then queries scaler for advance widths.
+/// One shaped glyph: glyph_id, advance, font bytes (None = primary font), font_index.
+pub type ShapedGlyph = (u16, f32, Option<Arc<Vec<u8>>>, u8);
+
+/// Simple horizontal text layout. Returns one ShapedGlyph per character.
+/// Characters missing from the primary font are looked up in OS fallback fonts and
+/// rasterized from there; their advance is rounded to a positive multiple of the
+/// primary font's 'e' width so they snap to a clean grid relative to the base font.
 pub fn layout_text(
     cache: &mut GlyphCache,
     font_data: &'static [u8],
@@ -213,26 +319,41 @@ pub fn layout_text(
     text: &str,
     size_px: f32,
     hint: bool,
-) -> Vec<(u16, f32)> {
+) -> Vec<ShapedGlyph> {
     let font_ref = match FontRef::from_index(font_data, 0) {
         Some(f) => f,
         None => return vec![],
     };
     let charmap = font_ref.charmap();
     let glyph_metrics = font_ref.glyph_metrics(&[]).scale(size_px);
+    let e_width = glyph_metrics.advance_width(charmap.map('e'));
 
     let mut glyphs = Vec::with_capacity(text.len());
     for ch in text.chars() {
         let gid = charmap.map(ch);
-        let adv = glyph_metrics.advance_width(gid);
-        glyphs.push((gid, adv));
-        // Pre-rasterize so atlas is ready before draw.
-        cache.get_or_rasterize(font_data, font_index, gid as u16, size_px, hint);
+        if gid == 0 {
+            // Try OS fallback fonts.
+            let fallback = fallback_db().lock().ok().and_then(|mut db| db.find(ch, size_px));
+            if let Some(fb) = fallback {
+                let adv = round_to_e(fb.advance, e_width);
+                cache.get_or_rasterize(&fb.bytes, fb.font_index, fb.glyph_id, size_px, hint);
+                glyphs.push((fb.glyph_id, adv, Some(fb.bytes), fb.font_index));
+            } else {
+                // Truly unknown: reserve space, render nothing.
+                glyphs.push((0u16, e_width, None, font_index));
+            }
+        } else {
+            let adv = glyph_metrics.advance_width(gid);
+            cache.get_or_rasterize(font_data, font_index, gid as u16, size_px, hint);
+            glyphs.push((gid, adv, None, font_index));
+        }
     }
     glyphs
 }
 
 /// Measure the total pixel width of a text string.
+/// Characters missing from the primary font use a fallback advance rounded to a
+/// positive multiple of the primary font's 'e' width.
 pub fn measure_text_width(font_data: &'static [u8], text: &str, size_px: f32) -> f32 {
     let font_ref = match FontRef::from_index(font_data, 0) {
         Some(f) => f,
@@ -240,7 +361,17 @@ pub fn measure_text_width(font_data: &'static [u8], text: &str, size_px: f32) ->
     };
     let charmap = font_ref.charmap();
     let glyph_metrics = font_ref.glyph_metrics(&[]).scale(size_px);
+    let e_width = glyph_metrics.advance_width(charmap.map('e'));
     text.chars().map(|ch| {
-        glyph_metrics.advance_width(charmap.map(ch))
+        let gid = charmap.map(ch);
+        if gid == 0 {
+            let raw = fallback_db().lock().ok()
+                .and_then(|mut db| db.find(ch, size_px))
+                .map(|fb| fb.advance)
+                .unwrap_or(e_width);
+            round_to_e(raw, e_width)
+        } else {
+            glyph_metrics.advance_width(gid)
+        }
     }).sum()
 }
