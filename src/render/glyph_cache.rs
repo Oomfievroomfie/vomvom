@@ -447,10 +447,22 @@ fn shape_line_inner(
 ) -> Vec<ShapedRun> {
     use unicode_bidi::BidiInfo;
 
-    let bidi = BidiInfo::new(text, None);
-    if bidi.paragraphs.is_empty() { return vec![]; }
-    let para = &bidi.paragraphs[0];
-    let (run_levels, visual_run_ranges) = bidi.visual_runs(para, para.range.clone());
+    // Leading whitespace (spaces and tabs) must stay at the visual left regardless of
+    // paragraph direction. Bidi resolves their level from context, which would move them
+    // rightward on RTL lines. Strip them first, shape them as a plain LTR prefix run,
+    // then run bidi only on the remainder.
+    let leading_ws_bytes = text.len() - text.trim_start_matches(|c| c == ' ' || c == '\t').len();
+    let (leading_ws, rest) = text.split_at(leading_ws_bytes);
+
+    let bidi = BidiInfo::new(rest, None);
+    if bidi.paragraphs.is_empty() && leading_ws.is_empty() { return vec![]; }
+    let (run_levels, visual_run_ranges) = if bidi.paragraphs.is_empty() {
+        (vec![], vec![])
+    } else {
+        let para = &bidi.paragraphs[0];
+        let (lvls, ranges) = bidi.visual_runs(para, para.range.clone());
+        (lvls, ranges)
+    };
 
     let primary_font_ref = match FontRef::from_index(font_data, 0) {
         Some(f) => f,
@@ -474,18 +486,30 @@ fn shape_line_inner(
 
     let mut raw_runs: Vec<RawRun> = Vec::new();
 
+    // Prepend the leading whitespace as a plain LTR run so it always sits at visual left.
+    if !leading_ws.is_empty() {
+        raw_runs.push(RawRun {
+            text_range: 0..leading_ws_bytes,
+            direction: BiDiDir::Ltr,
+            font_bytes: None,
+            font_face_index: 0,
+            font_index,
+        });
+    }
+
     for vrun_range in &visual_run_ranges {
         // Get the level at the start of this run to determine direction.
         let level = run_levels.get(vrun_range.start).copied()
             .unwrap_or(unicode_bidi::LTR_LEVEL);
         let dir = if level.is_rtl() { BiDiDir::Rtl } else { BiDiDir::Ltr };
-        let run_text = &text[vrun_range.clone()];
+        // vrun_range is relative to `rest`; offset by leading_ws_bytes to index `text`.
+        let run_text = &rest[vrun_range.clone()];
 
         // Compute font-boundary sub-runs within this BiDi run.
         // Walk chars in logical order; switch sub-run when font changes.
         let mut sub_runs: Vec<RawRun> = Vec::new();
 
-        let mut sub_start_byte = vrun_range.start; // absolute in `text`
+        let mut sub_start_byte = leading_ws_bytes + vrun_range.start; // absolute in `text`
         let mut cur_font_bytes: Option<Arc<Vec<u8>>> = None;
         let mut cur_face_index: usize = 0;
         let mut cur_font_index: u8 = font_index;
@@ -494,7 +518,7 @@ fn shape_line_inner(
         // We need to walk chars with byte offsets.
         let mut char_iter = run_text.char_indices().peekable();
         while let Some((rel_offset, ch)) = char_iter.next() {
-            let abs_offset = vrun_range.start + rel_offset;
+            let abs_offset = leading_ws_bytes + vrun_range.start + rel_offset;
             let next_abs = abs_offset + ch.len_utf8() as usize;
 
             let (new_bytes, new_face, new_fidx) = if primary_charmap.map(ch) != 0 {
